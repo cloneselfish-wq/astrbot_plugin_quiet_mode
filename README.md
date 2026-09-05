@@ -1,5 +1,9 @@
 # astrbot_plugin_quiet_mode
 
+<p align="center">
+  <img src="logo.png" alt="闭嘴模式" width="180"/>
+</p>
+
 一个 AstrBot 闭嘴/张嘴控制插件：让 bot 像平常对话一样告别，然后真的闭嘴；张嘴时对闭嘴期间发生的事做出真实反应。
 
 ## 特性

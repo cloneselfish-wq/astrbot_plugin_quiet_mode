@@ -73,7 +73,7 @@ DEFAULT_RESUME_INJECTION = (
     "astrbot_plugin_quiet_mode",
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）",
-    "1.3.0",
+    "1.3.1",
     "",
 )
 class QuietModePlugin(Star):

@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.1] - 2026-09-05
+
+### Added
+
+- **插件图标**：新增 `logo.png`（AstrBot 框架自动检测插件目录下的 `logo.png`，WebUI / 插件市场展示用），并提供 512×512 优化版（442 KB）
+- **平台支持标注**：`metadata.yaml` 新增 `support_platforms` 字段，显式声明适配全部 18 个平台适配器（aiocqhttp / QQ 官方 / 微信系 / Telegram / Discord / Slack / KOOK / LINE / 钉钉 / 飞书 / Satori / WebChat 等）——插件仅使用通用事件 API，与平台无关
+
 ## [1.3.0] - 2026-09-05
 
 ### Changed

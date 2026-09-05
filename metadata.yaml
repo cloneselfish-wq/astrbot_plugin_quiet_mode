@@ -1,6 +1,27 @@
 name: astrbot_plugin_quiet_mode
 display_name: 闭嘴模式
 desc: "可配置的闭嘴/张嘴控制。切换时先开启/解除拦截，再像平常对话一样生成反应：读取真实会话历史+人格，触发 livingmemory 等插件的记忆召回（OnLLMRequestEvent 钩子），最后问答写回会话——温柔 bot 会像平常一样聊天后做嘱托，张嘴时能对闭嘴期间的聊天做出反应，且人格再傲娇也会服从闭嘴。拦截方式可配置（静默拦截/仅 LLM 拦截）。状态持久化，重启不丢。"
-version: 1.3.0
+version: 1.3.1
 author: user
 repo: ""
+# 平台支持：本插件只使用 AstrBot 通用事件 API（消息拦截/LLM 钩子/会话管理），
+# 不依赖任何特定平台接口，理论上适配全部平台适配器
+support_platforms:
+  - aiocqhttp      # QQ (NapCat/Lagrange 等协议端)
+  - qqofficial     # QQ 官方机器人
+  - qqofficial_webhook  # QQ 官方机器人 (Webhook)
+  - weixin_official_account  # 微信公众号
+  - weixin_oc      # 微信开放平台
+  - wecom          # 企业微信
+  - wecom_ai_bot   # 企业微信智能机器人
+  - telegram       # Telegram
+  - discord        # Discord
+  - slack          # Slack
+  - dingtalk       # 钉钉
+  - lark           # 飞书
+  - kook           # KOOK
+  - line           # LINE
+  - mattermost     # Mattermost
+  - misskey        # Misskey
+  - satori         # Satori 协议
+  - webchat        # WebChat
