@@ -1,0 +1,90 @@
+{
+  "target_keywords": {
+    "type": "list",
+    "description": "目标人格关键词",
+    "hint": "闭嘴/张嘴指令必须同时包含其中之一。可配置多个别名，例如: 沙绫、saaya、独角兽。",
+    "items": {"type": "string"},
+    "default": ["沙绫", "saaya", "独角兽"]
+  },
+  "silent_triggers": {
+    "type": "list",
+    "description": "闭嘴触发词",
+    "hint": "消息文本中包含任一即触发闭嘴。建议用不易误触的短语，避免正常聊天误触发。",
+    "items": {"type": "string"},
+    "default": ["闭嘴", "shut up", "别说话", "安静一下"]
+  },
+  "resume_triggers": {
+    "type": "list",
+    "description": "张嘴触发词",
+    "hint": "消息文本中包含任一即触发张嘴。建议用不易误触的短语。",
+    "items": {"type": "string"},
+    "default": ["张嘴", "醒醒", "可以说话了", "说话吧"]
+  },
+  "global_silent_triggers": {
+    "type": "list",
+    "description": "全局闭嘴触发词（不需要目标人格关键词即可触发全局闭嘴）",
+    "items": {"type": "string"},
+    "default": ["全群闭嘴", "全局闭嘴"]
+  },
+  "global_resume_triggers": {
+    "type": "list",
+    "description": "全局张嘴触发词",
+    "items": {"type": "string"},
+    "default": ["全群张嘴", "全局张嘴", "恢复"]
+  },
+  "admin_only": {
+    "type": "bool",
+    "description": "是否仅管理员可触发闭嘴/张嘴",
+    "hint": "开启后普通用户发送的闭嘴/张嘴消息会被静默丢弃（不会告知对方）。",
+    "default": true
+  },
+  "admin_qqs": {
+    "type": "list",
+    "description": "额外的管理员 QQ 号列表（与 AstrBot admin 权限并列）",
+    "hint": "留空则使用 AstrBot 的 admin 权限判断。填你自己的 QQ 号可以避免 bot 自己权限配置影响。",
+    "items": {"type": "string"},
+    "default": []
+  },
+  "final_reply_enabled": {
+    "type": "bool",
+    "description": "切换闭嘴/张嘴时是否让 bot 发一条「最后感言」",
+    "hint": "开启后：切换状态时先拦截，再调用一次 LLM 让 bot 用人格口吻表态（闭嘴前的最后一句/重新开口的第一句）。关闭则回到纯静默切换。",
+    "default": true
+  },
+  "silent_injection": {
+    "type": "string",
+    "description": "闭嘴感言的提示词注入模板",
+    "hint": "感言会像平常对话一样结合会话历史与记忆召回（livingmemory 等插件）生成。此模板约束 bot：即使人格傲娇/强势，也必须像平常一样回应后服从闭嘴收尾。留空使用内置默认模板。",
+    "default": "",
+    "_placeholder": "（留空使用内置默认模板）"
+  },
+  "resume_injection": {
+    "type": "string",
+    "description": "张嘴感言的提示词注入模板",
+    "hint": "感言会像平常对话一样生成：可对闭嘴期间的聊天内容/被禁言这件事做出真实反应。留空使用内置默认模板。",
+    "default": "",
+    "_placeholder": "（留空使用内置默认模板）"
+  },
+  "silent_fallback_text": {
+    "type": "string",
+    "description": "闭嘴感言生成失败时的兜底文案",
+    "default": "……哼，好吧好吧，我闭嘴就是了。"
+  },
+  "resume_fallback_text": {
+    "type": "string",
+    "description": "张嘴感言生成失败时的兜底文案",
+    "default": "我回来啦～刚才可把我憋坏了。"
+  },
+  "silent_intercept_enabled": {
+    "type": "bool",
+    "description": "静默拦截开关（闭嘴时完全阻断消息）",
+    "hint": "开启后：闭嘴状态下本群所有消息会被完全阻断（stop_event），其他插件也收不到。优先级高于 LLM 拦截。",
+    "default": true
+  },
+  "llm_intercept_enabled": {
+    "type": "bool",
+    "description": "LLM 拦截开关（闭嘴时只禁止 AI 回复，其他插件照常）",
+    "hint": "仅当静默拦截关闭时生效：闭嘴状态下只禁止默认 LLM 回复，记忆学习、RSS 等插件照常处理消息。两个开关都关 = 闭嘴只改状态、不拦截任何消息。",
+    "default": true
+  }
+}
