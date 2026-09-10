@@ -74,14 +74,14 @@
   },
   "admin_only": {
     "type": "bool",
-    "description": "是否仅管理员可触发闭嘴/张嘴",
-    "hint": "开启后普通用户发送的闭嘴/张嘴消息会被静默丢弃（不会告知对方）。",
-    "default": true
+    "description": "单群闭嘴/张嘴是否也仅管理员可触发",
+    "hint": "权限分两级（1.7.3 起）：【全局指令】全群闭嘴/全群张嘴、/quiet_global_silent、/quiet_global_resume、/quiet_clear_groups —— 恒定仅 AstrBot 全局管理员（WebUI「配置 → 管理员ID」，即 cmd_config.json 的 admins_id）可触发，与本项无关；【单群指令】人格关键词 + 触发词 —— 默认人人可触发，本项开启后才要求管理员。",
+    "default": false
   },
   "admin_qqs": {
     "type": "list",
     "description": "额外的管理员 QQ 号列表（与 AstrBot 管理员权限并列）",
-    "hint": "只作用于「闭嘴/张嘴」这类动作的额外白名单。**登记机器人不读本项**——那条规则只认 AstrBot 全局管理员（配置里的「管理员ID」，即 cmd_config.json 的 admins_id），不在插件里另设一套管理员。若 admins_id 仍是默认占位符 [\"astrbot\"]，等于没有全局管理员，需先在 WebUI「配置 → 管理员ID」里补上自己的 QQ。另外本项也不看 QQ 群主/管理员角色。",
+    "hint": "**仅**在 admin_only=true（单群指令收紧）时生效的额外白名单，与 AstrBot 全局管理员取并集。全局指令与登记机器人都**不读**本项——它们只认 AstrBot 全局管理员（WebUI「配置 → 管理员ID」，即 cmd_config.json 的 admins_id）；若 admins_id 仍是默认占位符 [\"astrbot\"]，等于没有全局管理员。另外本项也不看 QQ 群主/管理员角色。",
     "items": {
       "type": "string"
     },

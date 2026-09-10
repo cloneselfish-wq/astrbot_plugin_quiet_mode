@@ -149,7 +149,7 @@ DEFAULT_UNMUTE_INJECTION = (
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环、"
     "禁言自动闭嘴与对话式登记机器人",
-    "1.7.2",
+    "1.7.3",
     "",
 )
 class QuietModePlugin(Star):
@@ -475,11 +475,18 @@ class QuietModePlugin(Star):
             ids = []
         return {str(i).strip() for i in ids if str(i).strip()}
 
-    def _is_authorized(self, event: AstrMessageEvent) -> bool:
-        """闭嘴/张嘴等动作的授权。
+    def _is_authorized(self, event: AstrMessageEvent, scope: str = "group") -> bool:
+        """闭嘴/张嘴指令的授权（1.7.3 起按作用域分级）。
 
-        admin_only 关闭 → 放行所有人；否则 admin_qqs 白名单 ∪ AstrBot 管理员。
+        - scope="global"：**恒定仅 AstrBot 全局管理员**（cmd_config.json 的
+          admins_id）。全群闭嘴一次影响所有会话，属高影响动作，不接受插件侧白名单，
+          也不受 admin_only 影响——即便 admin_only=False 也拦住。
+        - scope="group"：默认**任何人**都能触发（产品要求：单个会话的闭嘴/张嘴
+          谁都可以喊）；仅当 admin_only=True 时才要求管理员，此时
+          admin_qqs 白名单 与 AstrBot 管理员 取并集。
         """
+        if scope == "global":
+            return self._is_bot_admin(event)
         if not self.admin_only:
             return True
         try:
@@ -711,10 +718,15 @@ class QuietModePlugin(Star):
             cmd = None if is_other_bot else self._match_command(text.lower())
 
             if cmd:
-                # 权限检查：非管理员触发闭嘴/张嘴 → 静默丢弃（不告诉对方，避免泄露规则）
-                if not self._is_authorized(event):
-                    logger.debug(
-                        f"[quiet_mode] 非管理员触发闭嘴/张嘴指令 sender={event.get_sender_id()} 已静默丢弃"
+                # 权限检查（1.7.3 分级）：
+                #   全局指令 → 仅 AstrBot 全局管理员；单群指令 → 默认任何人。
+                #   不通过则静默丢弃（不回话，避免把规则暴露给普通群友），
+                #   但记 info 级日志，方便「喊了没反应」时定位。
+                if not self._is_authorized(event, cmd["scope"]):
+                    logger.info(
+                        f"[quiet_mode] 无视 {cmd['scope']} 指令（无权限）"
+                        f" sender={event.get_sender_id()} group={gid}"
+                        f" action={cmd['action']} scope={cmd['scope']} 已静默丢弃"
                     )
                     event.stop_event()
                     return
@@ -1123,7 +1135,8 @@ class QuietModePlugin(Star):
         也刻意不看 QQ 群主/管理员角色（群角色由群主随意授予，不等于平台管理员）。
 
         注意不要复用 admin_only 那条宽松路径：admin_only=False 时 _is_authorized
-        会对所有人放行，而「登记谁是 bot」会改变后续对话行为，必须严格判权限。
+        会对所有人放行（单群指令刻意如此），而「登记谁是 bot」与「全局闭嘴」都会改变
+        跨会话行为，必须走本函数严格判权限。
         """
         try:
             sender = str(event.get_sender_id() or "").strip()
@@ -1452,8 +1465,9 @@ class QuietModePlugin(Star):
 
     @filter.command("quiet_global_silent", alias={"qm_g_silent"})
     async def quiet_global_silent_cmd(self, event: AstrMessageEvent):
-        if not self._is_authorized(event):
-            yield event.plain_result("❌ 仅管理员可操作")
+        # 全局指令恒定仅 AstrBot 全局管理员（与 admin_only 无关）
+        if not self._is_bot_admin(event):
+            yield event.plain_result("❌ 仅 AstrBot 管理员可操作全局设置")
             return
         self.state["global_quiet"] = True
         self._save_state()
@@ -1461,8 +1475,8 @@ class QuietModePlugin(Star):
 
     @filter.command("quiet_global_resume", alias={"qm_g_resume"})
     async def quiet_global_resume_cmd(self, event: AstrMessageEvent):
-        if not self._is_authorized(event):
-            yield event.plain_result("❌ 仅管理员可操作")
+        if not self._is_bot_admin(event):
+            yield event.plain_result("❌ 仅 AstrBot 管理员可操作全局设置")
             return
         self.state["global_quiet"] = False
         self._save_state()
@@ -1470,8 +1484,8 @@ class QuietModePlugin(Star):
 
     @filter.command("quiet_clear_groups", alias={"qm_clear"})
     async def quiet_clear_groups_cmd(self, event: AstrMessageEvent):
-        if not self._is_authorized(event):
-            yield event.plain_result("❌ 仅管理员可操作")
+        if not self._is_bot_admin(event):
+            yield event.plain_result("❌ 仅 AstrBot 管理员可操作全局设置")
             return
         self.state["quiet_groups"] = []
         self._save_state()

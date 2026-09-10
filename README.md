@@ -70,8 +70,8 @@ git clone https://github.com/cloneselfish-wq/astrbot_plugin_quiet_mode.git
 | `global_silent_triggers` | `["全群闭嘴", "全局闭嘴"]` | 全局闭嘴触发词（无需目标关键词） |
 | `global_resume_triggers` | `["全群张嘴", "全局张嘴", "全群恢复", "全局恢复"]` | 全局张嘴触发词 |
 | `global_trigger_max_residual` | `4` | 全局触发的纯度阈值：去掉触发词/@/标点后剩余字数超过它就当普通聊天、不执行；填 `0` 关闭检查 |
-| `admin_only` | `true` | 仅管理员可切换 |
-| `admin_qqs` | `[]` | 「闭嘴/张嘴」动作的额外管理员 QQ 号；**不影响登记机器人**（那项只认 AstrBot 全局管理员） |
+| `admin_only` | `false` | 单群闭嘴/张嘴是否也仅管理员可触发。**默认关**：单群指令人人可用；**全局指令恒定仅 AstrBot 管理员**，与本项无关 |
+| `admin_qqs` | `[]` | 仅在 `admin_only=true` 时生效的额外白名单；**不影响全局指令与登记机器人**（那两项只认 AstrBot 全局管理员） |
 | `final_reply_enabled` | `true` | 切换时是否生成对话式感言 |
 | `silent_injection` | 内置模板 | 闭嘴感言提示词注入（可自定义） |
 | `resume_injection` | 内置模板 | 张嘴感言提示词注入（可自定义） |
