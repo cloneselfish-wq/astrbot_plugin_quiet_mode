@@ -18,6 +18,12 @@ astrbot_plugin_quiet_mode
   并手动触发 OnLLMRequestEvent 钩子让 livingmemory 等聊天增强插件注入记忆召回，
   使感言"像平常对话一样"——温柔 bot 会结合上下文做最后的嘱托，张嘴时能对
   闭嘴期间的聊天内容做出反应。生成后问答写回 conversation，之后的聊天仍记得这次告别。
+- 1.4.0: Bot 防互引用循环（bot_guard）：当群里其他 bot（bot_qq_list 配置）发言时，
+  ①通过 on_llm_request 钩子向 LLM 注入提醒「对方也是 bot，别无限对谈」；
+  ②通过 on_decorating_result 钩子对本条回复免引用直发（框架的引用回复是在该钩子之后
+  由 ResultDecorateStage 统一插入的，插件无法删 Reply 组件，只能自发送+清空 result
+  抢在框架装饰之前发出）。回复其他人时引用行为完全不受影响。
+  另有连续 bot 消息轮数熔断（bot_guard_max_rounds）与完全无视模式（ignore）。
 
 用法示例（在配置了 target=["沙绫"]、silent=["闭嘴"]、resume=["张嘴"] 时）：
   - 「沙绫 闭嘴」  → 当前群闭嘴，bot 不再回复任何消息
@@ -25,6 +31,10 @@ astrbot_plugin_quiet_mode
   - 「全群闭嘴」   → 所有群都闭嘴（仅管理员）
   - 「全群张嘴」   → 解除全局闭嘴
   - 「/闭嘴状态」   → 查看当前闭嘴状态（标准指令，需 wake_prefix）
+
+v1.4.0 bot_guard 用法：在 WebUI 配置页把其他 bot 的 QQ 号填入 bot_qq_list 即可。
+回复那些 bot 时不引用对方消息 + LLM 收到「对方是 bot」提醒，避免两个 bot 互相引用
+无限对谈；回复普通群友的引用行为不受影响。
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ from typing import Any
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import At, Reply
 from astrbot.core.star.star_tools import StarTools
 
 try:
@@ -68,12 +79,22 @@ DEFAULT_RESUME_INJECTION = (
     "2. 只输出你要发在群里的那句话，控制在合适长度，不要任何解释、括号备注或系统文字。"
 )
 
+# 1.4.0: Bot 防互引用循环的提醒模板（支持 {sender_name}/{sender_id}/{group_id} 占位符）
+DEFAULT_BOT_GUARD_REMINDER = (
+    "【系统提示 · 群管理】刚刚在群里发言的「{sender_name}」（QQ:{sender_id}）"
+    "是另一个机器人，不是真人。请注意：\n"
+    "1. 对方是 bot，这段对话里没有任何真实的人类用户在参与，"
+    "不要与它展开无限制的连续对谈；\n"
+    "2. 回复它时请简短克制，不要提问、不要留话题钩子，让对话自然结束；\n"
+    "3. 这条提示只针对这个机器人，不影响你回复其他真人群友。"
+)
+
 
 @register(
     "astrbot_plugin_quiet_mode",
     "user",
-    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）",
-    "1.3.1",
+    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环",
+    "1.4.0",
     "",
 )
 class QuietModePlugin(Star):
@@ -144,6 +165,30 @@ class QuietModePlugin(Star):
             self.config.get("llm_intercept_enabled", True)
         )
 
+        # 1.4.0: Bot 防互引用循环（bot_guard）
+        self.bot_guard_enabled = bool(self.config.get("bot_guard_enabled", True))
+        self.bot_qq_set = {
+            str(q).strip()
+            for q in (self.config.get("bot_qq_list") or [])
+            if str(q).strip()
+        }
+        self.bot_reply_mode = str(
+            self.config.get("bot_reply_mode") or "no_quote"
+        ).strip().lower()
+        if self.bot_reply_mode not in ("no_quote", "ignore"):
+            self.bot_reply_mode = "no_quote"
+        custom_reminder = str(self.config.get("bot_guard_reminder") or "").strip()
+        self.bot_guard_reminder = custom_reminder or DEFAULT_BOT_GUARD_REMINDER
+        try:
+            self.bot_guard_max_rounds = int(
+                self.config.get("bot_guard_max_rounds", 0) or 0
+            )
+        except (TypeError, ValueError):
+            self.bot_guard_max_rounds = 0
+        # 每群连续 bot 消息计数（真人群友发言即清零）
+        self._bot_rounds: dict[str, int] = {}
+        self._bot_guard_extra_key = "quiet_mode_bot_guard_active"
+
         logger.info(
             f"[quiet_mode] 已加载 | target={self.target_keywords} "
             f"silent={self.silent_triggers} resume={self.resume_triggers} "
@@ -152,6 +197,9 @@ class QuietModePlugin(Star):
             f"final_reply={self.final_reply_enabled} "
             f"silent_intercept={self.silent_intercept_enabled} "
             f"llm_intercept={self.llm_intercept_enabled} "
+            f"bot_guard={self.bot_guard_enabled} bot_qq={sorted(self.bot_qq_set)} "
+            f"bot_reply_mode={self.bot_reply_mode} "
+            f"bot_max_rounds={self.bot_guard_max_rounds} "
             f"state={self.state}"
         )
 
@@ -504,6 +552,145 @@ class QuietModePlugin(Star):
                 f"[quiet_mode] on_group_message 异常: {e}", exc_info=True
             )
 
+    # ---------------- Bot 防互引用循环（1.4.0 bot_guard） ----------------
+    # 背景规则（改代码前先理解，均为框架源码验证结论）：
+    # - 框架的「引用回复」是在 ResultDecorateStage 中、所有 on_decorating_result 钩子
+    #   执行完之后统一插入的（result.chain.insert(0, Reply(id=消息id))），且只对
+    #   「全为 Plain/Image」的消息链生效。插件在钩子里删 Reply 是无效的。
+    # - 因此免引用只能：在本钩子里自己把回复发出去，再清空 result，让框架的
+    #   RespondStage 发现没有结果可发而跳过。
+    # - 自发送会绕过 RespondStage，其收尾的 OnAfterMessageSentEvent 钩子
+    #   （self_learning 等插件依赖）需要手动补发一次。
+
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE,
+        priority=9000,  # 低于闭嘴拦截的 10000：闭嘴状态优先生效
+    )
+    async def bot_guard_on_group_message(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ):
+        """识别来自其他 bot 的群消息：打标（提醒注入+免引用）、按模式拦截、轮数熔断。"""
+        try:
+            try:
+                if str(event.get_sender_id()) == str(event.get_self_id()):
+                    return
+            except Exception:
+                pass
+
+            gid = str(event.get_group_id())
+            sender_id = str(event.get_sender_id())
+            is_bot = sender_id in self.bot_qq_set
+
+            # 连续 bot 消息计数：任何真人发言即清零
+            self._bot_rounds[gid] = self._bot_rounds.get(gid, 0) + 1 if is_bot else 0
+
+            if not self.bot_guard_enabled or not is_bot:
+                return
+
+            rounds_exceeded = (
+                self.bot_guard_max_rounds > 0
+                and self._bot_rounds[gid] >= self.bot_guard_max_rounds
+            )
+            if self.bot_reply_mode == "ignore" or rounds_exceeded:
+                logger.info(
+                    f"[quiet_mode] bot_guard: 拦截 bot 消息 sender={sender_id} "
+                    f"group={gid} rounds={self._bot_rounds[gid]} "
+                    f"mode={self.bot_reply_mode} exceeded={rounds_exceeded}"
+                )
+                event.stop_event()
+                return
+
+            # 打标：后续的 on_llm_request（提醒注入）与 on_decorating_result（免引用）生效
+            event.set_extra(
+                self._bot_guard_extra_key,
+                {
+                    "sender_id": sender_id,
+                    "sender_name": event.get_sender_name() or sender_id,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                f"[quiet_mode] bot_guard_on_group_message 异常: {e}", exc_info=True
+            )
+
+    @filter.on_llm_request(priority=-9999)  # 最后执行：追加在 system_prompt 末尾，不被其他插件覆盖
+    async def bot_guard_llm_reminder(
+        self, event: AstrMessageEvent, req
+    ) -> None:
+        """向 LLM 注入「对方也是 bot」的提醒。"""
+        try:
+            if not self.bot_guard_enabled:
+                return
+            info = event.get_extra(self._bot_guard_extra_key)
+            if not info:
+                return
+            try:
+                reminder = self.bot_guard_reminder.format(
+                    sender_name=info.get("sender_name", ""),
+                    sender_id=info.get("sender_id", ""),
+                    group_id=str(event.get_group_id()),
+                )
+            except Exception:
+                # 模板占位符写错时不炸，退回原文
+                reminder = self.bot_guard_reminder
+            req.system_prompt = (req.system_prompt or "") + "\n\n" + reminder
+            logger.info(
+                f"[quiet_mode] bot_guard: 已注入 bot 提醒 (sender={info.get('sender_id')})"
+            )
+        except Exception as e:
+            logger.error(f"[quiet_mode] bot_guard_llm_reminder 异常: {e}", exc_info=True)
+
+    @filter.on_decorating_result()
+    async def bot_guard_no_quote(self, event: AstrMessageEvent) -> None:
+        """回复其他 bot 时免引用直发：自发送 + 清空 result，抢在框架插入 Reply 之前。"""
+        try:
+            if not self.bot_guard_enabled:
+                return
+            info = event.get_extra(self._bot_guard_extra_key)
+            if not info:
+                return
+            # 引用行为的差异主要在 QQ 协议端，其他平台保持框架默认行为
+            if event.get_platform_name() != "aiocqhttp":
+                return
+            result = event.get_result()
+            if result is None or not result.chain:
+                return
+            content_type_name = getattr(result.result_content_type, "name", "")
+            if content_type_name in ("STREAMING_RESULT", "STREAMING_FINISH"):
+                logger.debug("[quiet_mode] bot_guard: 流式输出，跳过免引用处理")
+                return
+
+            sender_id = str(info.get("sender_id", ""))
+            # 防御性剥离：可能已存在的 Reply、以及指向该 bot 的 At（@ 也会唤醒对方 bot）
+            result.chain = [
+                comp
+                for comp in result.chain
+                if not isinstance(comp, Reply)
+                and not (
+                    isinstance(comp, At)
+                    and str(getattr(comp, "qq", "")) == sender_id
+                )
+            ]
+
+            await event.send(result)
+            event.clear_result()
+            logger.info(
+                f"[quiet_mode] bot_guard: 已免引用直发回复 (sender={sender_id})"
+            )
+
+            # 补发 RespondStage 的收尾钩子，保持 self_learning 等插件行为一致
+            try:
+                from astrbot.core.pipeline.context_utils import call_event_hook
+                from astrbot.core.star.star_handler import EventType
+
+                await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+            except Exception as e:
+                logger.debug(
+                    f"[quiet_mode] bot_guard: 补发 OnAfterMessageSentEvent 失败（忽略）: {e}"
+                )
+        except Exception as e:
+            logger.error(f"[quiet_mode] bot_guard_no_quote 异常: {e}", exc_info=True)
+
     # ---------------- 标准指令（需要 wake_prefix） ----------------
 
     @filter.command("quiet_status", alias={"闭嘴状态", "沉默状态"})
@@ -514,6 +701,9 @@ class QuietModePlugin(Star):
             f"本群 (id={gid}): {'🔇 闭嘴中' if self._is_quiet(gid) else '🔊 正常'}",
             f"闭嘴群数: {len(self.state['quiet_groups'])}",
             f"闭嘴名单: {self.state['quiet_groups']}",
+            f"Bot防循环: {'✅ 开' if self.bot_guard_enabled else '❌ 关'} "
+            f"(名单: {sorted(self.bot_qq_set) or '空'}, 模式: {self.bot_reply_mode}, "
+            f"熔断轮数: {self.bot_guard_max_rounds or '不限'})",
         ]
         yield event.plain_result("\n".join(lines))
 

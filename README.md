@@ -21,6 +21,7 @@
   - **仅 LLM 拦截**：只禁止 AI 回复，记忆学习等插件照常工作——闭嘴期间的事 bot 都"看在眼里"，张嘴时能真实反应
 - 💾 **状态持久化**：重启容器/进程不丢失闭嘴状态
 - 🛡 **管理员权限控制**：仅管理员可切换，普通用户的指令静默丢弃
+- 🤖 **Bot 防互引用循环**：群里两个都开「回复时引用」的 bot 会无限互相对话——把对方 bot 的 QQ 号填进配置，本 bot 回复它时**不引用对方消息**，并提醒 LLM「对方也是 bot，别无限对谈」；回复普通群友的引用行为不受影响
 
 ## 安装
 
@@ -73,6 +74,20 @@ git clone https://github.com/cloneselfish-wq/astrbot_plugin_quiet_mode.git
 | `resume_fallback_text` | `我回来啦～刚才可把我憋坏了。` | 同上（张嘴） |
 | `silent_intercept_enabled` | `true` | 静默拦截：闭嘴时完全阻断消息 |
 | `llm_intercept_enabled` | `true` | 仅 LLM 拦截：闭嘴时只禁 AI 回复，其他插件照常（静默拦截关闭时生效） |
+| `bot_guard_enabled` | `true` | Bot 防互引用循环开关（需 `bot_qq_list` 非空才实际生效） |
+| `bot_qq_list` | `[]` | 群里**其他 bot** 的 QQ 号列表，回复它们时不引用对方消息 |
+| `bot_reply_mode` | `no_quote` | `no_quote`=回复但不引用对方；`ignore`=完全无视其他 bot 的消息 |
+| `bot_guard_reminder` | 内置模板 | 注入 LLM 的「对方也是 bot」提醒，支持 `{sender_name}` `{sender_id}` `{group_id}` 占位符 |
+| `bot_guard_max_rounds` | `0` | 连续 N 条 bot 消息无人插话后熔断（停止回应 bot），`0`=不限制 |
+
+### 推荐配置：Bot 防互引用循环
+
+两个 bot 都开了「回复时引用对话」时，它们会互相引用无限对聊。解决方式：
+
+1. 只需要改**其中一个** bot 的配置：在它的 WebUI 里打开本插件配置，把**另一个 bot** 的 QQ 号填入 `bot_qq_list`
+2. 保持 `bot_reply_mode=no_quote`：收到对方 bot 消息时正常回复，但不引用、并收到「对方也是 bot」的提醒，对话自然收敛
+3. 如果不想让 bot 理对方，把 `bot_reply_mode` 改成 `ignore`
+4. 提示词约束偶尔失灵时，可把 `bot_guard_max_rounds` 设为 `6` 之类作为硬熔断
 
 ### 推荐配置：让"张嘴感言"更真实
 

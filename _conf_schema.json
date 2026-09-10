@@ -86,5 +86,37 @@
     "description": "LLM 拦截开关（闭嘴时只禁止 AI 回复，其他插件照常）",
     "hint": "仅当静默拦截关闭时生效：闭嘴状态下只禁止默认 LLM 回复，记忆学习、RSS 等插件照常处理消息。两个开关都关 = 闭嘴只改状态、不拦截任何消息。",
     "default": true
+  },
+  "bot_guard_enabled": {
+    "type": "bool",
+    "description": "Bot 防互引用循环开关",
+    "hint": "开启后：回复 bot_qq_list 中的 bot 时不引用对方消息，并向 LLM 注入「对方也是 bot，别无限对谈」的提醒，避免两个开了引用回复的 bot 无限互相对话。回复普通群友的引用行为不受影响。",
+    "default": true
+  },
+  "bot_qq_list": {
+    "type": "list",
+    "description": "其他 Bot 的 QQ 号列表",
+    "hint": "把群里其他机器人的 QQ 号填进来（字符串即可），留空表示不启用防循环。例如: [\"3177624799\", \"123456789\"]。",
+    "items": {"type": "string"},
+    "default": []
+  },
+  "bot_reply_mode": {
+    "type": "string",
+    "description": "回复其他 Bot 的方式",
+    "hint": "no_quote = 正常回复但不引用对方消息（并注入 bot 提醒）；ignore = 完全无视其他 bot 的消息（不回复）。",
+    "default": "no_quote"
+  },
+  "bot_guard_reminder": {
+    "type": "string",
+    "description": "Bot 提醒注入模板",
+    "hint": "回复名单内 bot 时追加到 system_prompt 末尾的提醒。支持占位符 {sender_name} {sender_id} {group_id}。留空使用内置默认模板。",
+    "default": "",
+    "_placeholder": "（留空使用内置默认模板）"
+  },
+  "bot_guard_max_rounds": {
+    "type": "int",
+    "description": "Bot 连续对话熔断轮数",
+    "hint": "群里连续 N 条消息都来自其他 bot（中间没有真人插话）后，bot 停止回应这些 bot，直到有真人发言。0 = 不限制，只靠提示词约束。",
+    "default": 0
   }
 }

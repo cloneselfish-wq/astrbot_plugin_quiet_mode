@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-09-10
+
+### Added
+
+- **Bot 防互引用循环（bot_guard）**：解决两个都开启「回复时引用对话」的 bot 在群里无限互相对话的问题
+  - 把其他 bot 的 QQ 号填入 `bot_qq_list` 即启用；回复名单内 bot 时**不引用对方消息**，回复普通群友的引用行为完全不受影响
+  - 同时通过 `on_llm_request` 钩子向 LLM 注入「对方也是 bot，不要无限对谈」的提醒（模板可自定义，支持 `{sender_name}`/`{sender_id}`/`{group_id}` 占位符）
+  - 新配置：`bot_guard_enabled`、`bot_qq_list`、`bot_reply_mode`（`no_quote` 回复但不引用 / `ignore` 完全无视）、`bot_guard_reminder`、`bot_guard_max_rounds`（连续 N 条 bot 消息无人插话后熔断，0=不限制）
+  - `/quiet_status` 新增 bot_guard 状态显示
+
+### Technical
+
+- 框架源码结论：引用回复由 `ResultDecorateStage` 在**所有 `on_decorating_result` 钩子执行完之后**统一插入（`chain.insert(0, Reply(id=...))`），且只对「全为 Plain/Image」的消息链生效——插件在钩子里删 `Reply` 组件是**无效**的
+- 免引用实现：在 `on_decorating_result` 钩子里**自发送回复**（顺带剥离指向该 bot 的 `Reply`/`At` 组件）→ `event.clear_result()` → 框架 RespondStage 发现无结果而跳过，不会再发一遍（也不会再插引用）
+- 自发送绕过 RespondStage，故手动 `call_event_hook(OnAfterMessageSentEvent)` 补发收尾钩子，`self_learning` 等依赖发送后事件的插件行为保持一致
+- NapCat 源码结论：出站消息段类型未知时 `createSendElements` 会直接 throw——**不存在"隐形消息段"**，因此放弃"塞未知组件骗过 can_decorate"的方案
+- 提醒注入钩子用 `priority=-9999` 保证最后执行，追加在 system_prompt 末尾，避免被其他插件覆盖
+
 ## [1.3.1] - 2026-09-05
 
 ### Added
