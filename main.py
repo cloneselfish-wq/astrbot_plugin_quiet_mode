@@ -120,8 +120,9 @@ DEFAULT_UNMUTE_INJECTION = (
 @register(
     "astrbot_plugin_quiet_mode",
     "user",
-    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环与禁言自动闭嘴",
-    "1.5.1",
+    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环、"
+    "禁言自动闭嘴与对话式登记机器人",
+    "1.6.0",
     "",
 )
 class QuietModePlugin(Star):
@@ -987,6 +988,212 @@ class QuietModePlugin(Star):
         if self._mute_checker_task is not None and not self._mute_checker_task.done():
             self._mute_checker_task.cancel()
 
+    # ---------------- 1.6.0 对话式登记机器人（llm_tool + 指令） ----------------
+
+    def _is_bot_admin(self, event: AstrMessageEvent) -> bool:
+        """严格的管理员判定。
+
+        不复用 _is_authorized：后者在 admin_only=False 时会对所有人放行，
+        而登记机器人是「改名单、影响谁会被当 bot 对待」的动作，必须严格判权限。
+        """
+        if self.admin_qqs:
+            try:
+                return str(event.get_sender_id()) in self.admin_qqs
+            except Exception:
+                return False
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_target_qq(event: AstrMessageEvent) -> str:
+        """取目标 QQ：优先消息里的 At 组件，其次文本中的 5~12 位数字。
+
+        自动跳过 at 全员 与 at 自己（否则会把 bot 自己加进名单）。
+        """
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            self_id = ""
+        try:
+            for seg in event.get_messages() or []:
+                if isinstance(seg, At):
+                    q = str(getattr(seg, "qq", "") or "").strip()
+                    if q and q != "all" and q != self_id:
+                        return q
+        except Exception:
+            pass
+        try:
+            text = event.get_message_str() or ""
+        except Exception:
+            text = ""
+        for m in re.finditer(r"(?<!\d)(\d{5,12})(?!\d)", text):
+            if m.group(1) != self_id:
+                return m.group(1)
+        return ""
+
+    def _bot_qq_list(self) -> list[str]:
+        return [
+            str(q).strip()
+            for q in (self.config.get("bot_qq_list") or [])
+            if str(q).strip()
+        ]
+
+    async def _persist_plugin_config(self) -> bool:
+        """把 self.config 回写到插件配置文件；失败不影响内存态即时生效。"""
+        saver = getattr(self.config, "save_config_async", None)
+        if saver is not None:
+            try:
+                await saver()
+                return True
+            except Exception as e:
+                logger.warning(f"[quiet_mode] 配置异步回写失败: {e}")
+        saver = getattr(self.config, "save_config", None)
+        if saver is not None:
+            try:
+                saver()
+                return True
+            except Exception as e:
+                logger.warning(f"[quiet_mode] 配置回写失败: {e}")
+        return False
+
+    async def _apply_bot_member(
+        self, action: str, target: str, self_id: str = ""
+    ) -> str:
+        """增删 bot_qq_list 并持久化，返回一句人类可读的结果。"""
+        action = (action or "").strip().lower()
+        lst = self._bot_qq_list()
+
+        if action in ("list", "query", "查看"):
+            return (
+                f"当前机器人名单共 {len(lst)} 个：{lst}"
+                if lst
+                else "当前机器人名单为空。"
+            )
+
+        target = str(target or "").strip()
+        if not target or not target.isdigit():
+            return "❌ 没拿到有效的 QQ 号：请 @ 一下对方，或直接给出 QQ 号。"
+        if self_id and target == str(self_id).strip():
+            return "❌ 那是你自己，不能把自己标记成机器人。"
+
+        if action in ("remove", "del", "delete", "取消", "移除"):
+            if target not in lst:
+                return f"⚠️ {target} 本来就不在机器人名单里。"
+            lst = [q for q in lst if q != target]
+            verb = "已取消标记"
+        else:
+            if target in lst:
+                return f"⚠️ {target} 已经在机器人名单里了，无需重复标记。"
+            lst.append(target)
+            verb = "已标记为机器人"
+
+        self.config["bot_qq_list"] = lst
+        self.bot_qq_set = set(lst)
+        ok = await self._persist_plugin_config()
+        suffix = (
+            ""
+            if ok
+            else "（提醒：配置文件回写失败，重启后会丢失，建议在 WebUI 手动补一次）"
+        )
+        logger.info(
+            f"[quiet_mode] bot_guard 名单更新 action={action} qq={target} "
+            f"now={lst} persisted={ok}"
+        )
+        return (
+            f"✅ {verb}：{target}。以后回复他时不引用其消息，并会向 LLM 说明对方是机器人。"
+            f"当前名单：{lst}{suffix}"
+        )
+
+    @filter.llm_tool(name="set_group_bot_member")
+    async def llm_set_group_bot_member(
+        self,
+        event: AstrMessageEvent,
+        action: str = "add",
+        qq: str = "",
+    ):
+        """把某个群成员登记为「机器人」，或取消登记。仅群管理员可调用。
+
+        当群管理员明确告诉你「某个人 / 某个账号也是机器人（BOT、AI）」，
+        需要记住他、以便以后回复他时不引用他的消息时，调用本工具。
+        若管理员在这条消息里 @ 了对方，可以不填 qq，系统会自动从 @ 中取号。
+
+        Args:
+            action(string): 操作类型。add=标记为机器人（默认），remove=取消标记，list=查看当前名单。
+            qq(string): 目标账号的 QQ 号（纯数字）。仅当无法从 @ 中自动取号时才需要填。
+        """
+        if not self.bot_guard_enabled:
+            return (
+                "❌ Bot 防互引用循环功能已关闭，无法登记。"
+                "请让管理员先开启配置项 bot_guard_enabled。"
+            )
+        try:
+            gid = event.get_group_id()
+        except Exception:
+            gid = ""
+        if not gid:
+            return "❌ 只能在群聊里登记机器人。"
+        if not self._is_bot_admin(event):
+            logger.info(
+                f"[quiet_mode] 拒绝非管理员登记机器人 "
+                f"sender={event.get_sender_id()} group={gid}"
+            )
+            return "❌ 只有群管理员才能登记机器人，身份校验未通过。"
+
+        act = (action or "add").strip().lower()
+        if act in ("list", "query", "查看"):
+            return await self._apply_bot_member("list", "")
+
+        target = str(qq or "").strip() or self._extract_target_qq(event)
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        return await self._apply_bot_member(act, target, self_id=self_id)
+
+    @filter.command("标记bot", alias={"qm_mark_bot", "bot_add"})
+    async def mark_bot_cmd(self, event: AstrMessageEvent):
+        """显式指令兜底：/标记bot @某人 或 /标记bot 123456789"""
+        if not self._is_bot_admin(event):
+            yield event.plain_result("❌ 仅管理员可操作")
+            return
+        target = self._extract_target_qq(event)
+        if not target:
+            lst = self._bot_qq_list()
+            yield event.plain_result(
+                f"当前机器人名单（{len(lst)}）：{lst}\n"
+                "用法：/标记bot @某人   或   /标记bot 123456789"
+            )
+            return
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        yield event.plain_result(
+            await self._apply_bot_member("add", target, self_id=self_id)
+        )
+
+    @filter.command("取消标记bot", alias={"qm_unmark_bot", "bot_del"})
+    async def unmark_bot_cmd(self, event: AstrMessageEvent):
+        """显式指令兜底：/取消标记bot @某人 或 /取消标记bot 123456789"""
+        if not self._is_bot_admin(event):
+            yield event.plain_result("❌ 仅管理员可操作")
+            return
+        target = self._extract_target_qq(event)
+        if not target:
+            yield event.plain_result(
+                "用法：/取消标记bot @某人   或   /取消标记bot 123456789"
+            )
+            return
+        try:
+            self_id = str(event.get_self_id() or "")
+        except Exception:
+            self_id = ""
+        yield event.plain_result(
+            await self._apply_bot_member("remove", target, self_id=self_id)
+        )
+
     # ---------------- 标准指令（需要 wake_prefix） ----------------
 
     @filter.command("quiet_status", alias={"闭嘴状态", "沉默状态"})
@@ -1001,6 +1208,7 @@ class QuietModePlugin(Star):
             f"Bot防循环: {'✅ 开' if self.bot_guard_enabled else '❌ 关'} "
             f"(名单: {sorted(self.bot_qq_set) or '空'}, 模式: {self.bot_reply_mode}, "
             f"熔断轮数: {self.bot_guard_max_rounds or '不限'})",
+            "登记机器人: /标记bot @某人（或直接在群里告知，LLM 会调用工具登记）",
         ]
         yield event.plain_result("\n".join(lines))
 
