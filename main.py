@@ -55,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -148,7 +149,7 @@ DEFAULT_UNMUTE_INJECTION = (
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环、"
     "禁言自动闭嘴与对话式登记机器人",
-    "1.7.1",
+    "1.7.2",
     "",
 )
 class QuietModePlugin(Star):
@@ -188,6 +189,14 @@ class QuietModePlugin(Star):
             for k in (self.config.get("global_resume_triggers") or [])
             if k
         ]
+        # 1.7.2: 全局触发词的「指令纯度」保护
+        # 背景：默认全局恢复词里含「恢复」，导致「好的，我恢复说话了~」这类普通聊天被
+        #       当成全局张嘴指令——命中即切状态并发出莫名其妙的感言。现要求全局触发词
+        #       必须「近乎整句」出现才生效：去掉触发词/@段/标点后剩余内容 <= 本阈值。
+        #       <= 0 表示关闭该检查（回到旧行为）。
+        self.global_trigger_max_residual = int(
+            self.config.get("global_trigger_max_residual", 4) or 0
+        )
         self.admin_only = bool(self.config.get("admin_only", True))
         self.admin_qqs = [str(q) for q in (self.config.get("admin_qqs") or []) if q]
 
@@ -293,6 +302,7 @@ class QuietModePlugin(Star):
             f"[quiet_mode] 已加载 | target={self.target_keywords} "
             f"silent={self.silent_triggers} resume={self.resume_triggers} "
             f"g_silent={self.global_silent_triggers} g_resume={self.global_resume_triggers} "
+            f"g_max_residual={self.global_trigger_max_residual} "
             f"admin_only={self.admin_only} admin_qqs={self.admin_qqs} "
             f"final_reply={self.final_reply_enabled} "
             f"silent_intercept={self.silent_intercept_enabled} "
@@ -388,21 +398,44 @@ class QuietModePlugin(Star):
                 return kw
         return None
 
+    def _is_pure_command(self, text_lower: str, trigger: str) -> bool:
+        """判断这条消息是不是「在发指令」，而不是聊天里顺带提到触发词。
+
+        1.7.2 新增。做法：去掉触发词本身、@ 段占位、标点与空白后，剩余内容必须很短。
+          - 「全群张嘴」            → 剩余空串          → 是指令
+          - 「好的，我恢复说话了~」  → 剩余「好的我说话了」→ 不是指令
+        阈值由 global_trigger_max_residual 控制，<= 0 表示不做该检查。
+        """
+        limit = self.global_trigger_max_residual
+        if limit <= 0:
+            return True
+        residual = text_lower.replace(trigger, "")
+        residual = re.sub(r"@[^\s()]*\(\d+\)", " ", residual)  # @昵称(12345)
+        residual = re.sub(r"\[at:\d+\]", " ", residual)
+        residual = re.sub(r"[\W_]+", "", residual)
+        return len(residual) <= limit
+
     def _match_command(self, text_lower: str) -> dict | None:
         """
         返回匹配的指令 dict：
           - {"action": "silent"|"resume", "scope": "global"}
           - {"action": "silent"|"resume", "scope": "group", "target": <kw>}
         返回 None 表示不匹配。
+
+        1.7.2: 全局指令不再「命中即触发」，还要通过 _is_pure_command 的纯度检查，
+        避免普通聊天里出现「恢复」这类泛词就误切全局状态。
         """
-        # 1) 全局指令（不需要 target）
+        # 1) 全局指令（不需要 target，但必须是「一条正经指令」）
         g_silent = self._contains_any(text_lower, self.global_silent_triggers)
         g_resume = self._contains_any(text_lower, self.global_resume_triggers)
         if g_silent or g_resume:
-            return {
-                "action": "silent" if g_silent else "resume",
-                "scope": "global",
-            }
+            hit = g_silent or g_resume
+            if self._is_pure_command(text_lower, hit):
+                return {
+                    "action": "silent" if g_silent else "resume",
+                    "scope": "global",
+                }
+            # 不够纯 → 当作普通聊天，继续尝试单群判定
 
         # 2) 单群指令：必须包含 target + trigger
         target = self._contains_any(text_lower, self.target_keywords)
@@ -670,7 +703,12 @@ class QuietModePlugin(Star):
                     self._apply_intercept(event)
                 return
 
-            cmd = self._match_command(text.lower())
+            # 1.7.2: 其他 bot 的发言不当作闭嘴/张嘴指令
+            # （否则别的 bot 一句普通聊天里带「恢复」这类词，就可能误切本 bot 的状态）
+            sender_id = str(event.get_sender_id())
+            is_other_bot = sender_id in self.bot_qq_set
+
+            cmd = None if is_other_bot else self._match_command(text.lower())
 
             if cmd:
                 # 权限检查：非管理员触发闭嘴/张嘴 → 静默丢弃（不告诉对方，避免泄露规则）
@@ -681,16 +719,21 @@ class QuietModePlugin(Star):
                     event.stop_event()
                     return
 
+                want_quiet = cmd["action"] == "silent"
                 if cmd["scope"] == "global":
-                    self.state["global_quiet"] = cmd["action"] == "silent"
+                    changed = self.state["global_quiet"] != want_quiet
+                    self.state["global_quiet"] = want_quiet
                     self._save_state()
                     logger.info(
-                        f"[quiet_mode] admin={event.get_sender_id()} 切换全局闭嘴 → {self.state['global_quiet']}"
+                        f"[quiet_mode] sender={event.get_sender_id()} 全局闭嘴 → {want_quiet}"
+                        f"（{'状态已变更' if changed else '状态未变'}）"
                     )
                 else:
-                    self._set_group_quiet(gid, cmd["action"] == "silent")
+                    changed = (gid in self.state["quiet_groups"]) != want_quiet
+                    self._set_group_quiet(gid, want_quiet)
                     logger.info(
-                        f"[quiet_mode] admin={event.get_sender_id()} 切换群 {gid} 闭嘴 → {cmd['action']=='silent'}"
+                        f"[quiet_mode] sender={event.get_sender_id()} 群 {gid} 闭嘴 → {want_quiet}"
+                        f"（{'状态已变更' if changed else '状态未变'}）"
                     )
 
                 # 1.1.0: 先切换状态（拦截已生效/解除），阻断本条消息进入后续 handler 与 LLM，
@@ -698,7 +741,8 @@ class QuietModePlugin(Star):
                 # （不能用 yield：stop_event() 后 pipeline 不再把结果送进 RespondStage）
                 event.stop_event()
 
-                if self.final_reply_enabled:
+                # 1.7.2: 状态没有实际变化时不发感言（重复指令、误命中都不该有输出）
+                if self.final_reply_enabled and changed:
                     try:
                         farewell = await self._conversational_farewell(
                             event, cmd["action"], text

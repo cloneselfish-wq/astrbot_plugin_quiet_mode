@@ -3,34 +3,74 @@
     "type": "list",
     "description": "目标人格关键词",
     "hint": "闭嘴/张嘴指令必须同时包含其中之一。可配置多个别名，例如: 沙绫、saaya、独角兽。",
-    "items": {"type": "string"},
-    "default": ["沙绫", "saaya", "独角兽"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "沙绫",
+      "saaya",
+      "独角兽"
+    ]
   },
   "silent_triggers": {
     "type": "list",
     "description": "闭嘴触发词",
     "hint": "消息文本中包含任一即触发闭嘴。建议用不易误触的短语，避免正常聊天误触发。",
-    "items": {"type": "string"},
-    "default": ["闭嘴", "shut up", "别说话", "安静一下"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "闭嘴",
+      "shut up",
+      "别说话",
+      "安静一下"
+    ]
   },
   "resume_triggers": {
     "type": "list",
     "description": "张嘴触发词",
     "hint": "消息文本中包含任一即触发张嘴。建议用不易误触的短语。",
-    "items": {"type": "string"},
-    "default": ["张嘴", "醒醒", "可以说话了", "说话吧"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "张嘴",
+      "醒醒",
+      "可以说话了",
+      "说话吧"
+    ]
   },
   "global_silent_triggers": {
     "type": "list",
     "description": "全局闭嘴触发词（不需要目标人格关键词即可触发全局闭嘴）",
-    "items": {"type": "string"},
-    "default": ["全群闭嘴", "全局闭嘴"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "全群闭嘴",
+      "全局闭嘴"
+    ],
+    "hint": "默认「全群闭嘴」。1.7.2 起全局触发词必须「近乎整句」出现才生效（见 global_trigger_max_residual），避免聊天里顺带提到就被当成指令。"
   },
   "global_resume_triggers": {
     "type": "list",
     "description": "全局张嘴触发词",
-    "items": {"type": "string"},
-    "default": ["全群张嘴", "全局张嘴", "恢复"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "全群张嘴",
+      "全局张嘴",
+      "全群恢复",
+      "全局恢复"
+    ],
+    "hint": "默认「全群张嘴」。1.7.2 已移除过于宽泛的「恢复」——它会让「好的，我恢复说话了~」这类普通聊天误触发全局张嘴。"
+  },
+  "global_trigger_max_residual": {
+    "type": "int",
+    "description": "全局触发词允许的最大多余字数（指令纯度检查）",
+    "hint": "默认 4。全局触发词（全群闭嘴/全群张嘴等）命中后，还要把触发词、@、标点去掉，剩余内容不超过这个字数才真的执行。例：「好的，我恢复说话了~」去掉「恢复」后剩「好的我说话了」(6字) > 4，不触发；「全群张嘴」剩余为空，正常触发。填 0 关闭检查。",
+    "default": 4
   },
   "admin_only": {
     "type": "bool",
@@ -42,7 +82,9 @@
     "type": "list",
     "description": "额外的管理员 QQ 号列表（与 AstrBot 管理员权限并列）",
     "hint": "只作用于「闭嘴/张嘴」这类动作的额外白名单。**登记机器人不读本项**——那条规则只认 AstrBot 全局管理员（配置里的「管理员ID」，即 cmd_config.json 的 admins_id），不在插件里另设一套管理员。若 admins_id 仍是默认占位符 [\"astrbot\"]，等于没有全局管理员，需先在 WebUI「配置 → 管理员ID」里补上自己的 QQ。另外本项也不看 QQ 群主/管理员角色。",
-    "items": {"type": "string"},
+    "items": {
+      "type": "string"
+    },
     "default": []
   },
   "final_reply_enabled": {
@@ -97,7 +139,9 @@
     "type": "list",
     "description": "其他 Bot 的 QQ 号列表",
     "hint": "把群里其他机器人的 QQ 号填进来（字符串即可），留空表示不启用防循环。例如: [\"3177624799\", \"123456789\"]。v1.6.0 起可由管理员在群里直接登记（见下）：@对方 说「他也是机器人」，LLM 会调用工具自动写入本项；或用指令 /标记bot @某人、/取消标记bot @某人。v1.7.0 起另加一条不依赖 AI 的规则兜底：管理员 @对方 并说「是机器人/是BOT」，插件直接写入本项（由 bot_guard_auto_register 控制）。",
-    "items": {"type": "string"},
+    "items": {
+      "type": "string"
+    },
     "default": []
   },
   "bot_reply_mode": {
@@ -129,15 +173,35 @@
     "type": "list",
     "description": "规则登记触发关键词",
     "hint": "消息文本命中任一关键词（且含有非自己的 @ 目标）即视为「登记这些人也是机器人」。纯英文关键词按整词匹配，避免 ai 误命中 said / wait / email。",
-    "items": {"type": "string"},
-    "default": ["机器人", "机娘", "智能体", "bot", "ai"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "机器人",
+      "机娘",
+      "智能体",
+      "bot",
+      "ai"
+    ]
   },
   "bot_guard_register_exclude": {
     "type": "list",
     "description": "规则登记排除短语（否定语境不登记）",
     "hint": "消息中出现任一短语即放弃本次规则登记，用来挡掉「他不是机器人」「取消标记」这类反话。",
-    "items": {"type": "string"},
-    "default": ["不是机器人", "不是bot", "不是ai", "取消标记", "取消登记", "别当机器人", "解除标记", "不再是机器人", "不要登记"]
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "不是机器人",
+      "不是bot",
+      "不是ai",
+      "取消标记",
+      "取消登记",
+      "别当机器人",
+      "解除标记",
+      "不再是机器人",
+      "不要登记"
+    ]
   },
   "mute_auto_quiet_enabled": {
     "type": "bool",
