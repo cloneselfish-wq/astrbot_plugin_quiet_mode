@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.1] - 2026-09-10
+
+### Fixed
+
+- **感言里的 `on_llm_request` 钩子链被截断**：闭嘴/张嘴感言、解禁感言此前均在 `stop_event()` 之后生成，而框架 `call_event_hook` 每执行完一个 handler 就检查 `event.is_stopped()`、为真立即中断（`context_utils.py:105`），且 handler 按 priority 降序执行（`star_handler.py:26`）——导致只有优先级最高的 `meme_manager`（99999）能跑到，livingmemory 的长期记忆召回注入不进来（生产日志实证：该中断日志次数与感言次数严格 1:1）
+  - 现改为生成感言期间临时 `event.continue_event()`、`finally` 立即恢复停止状态，感言不再缺记忆召回
+- **`lift_ban`（管理员提前解封）分支缺少手动闭嘴判断**：禁言期间管理员若又手动把该群设为「闭嘴」，解封时仍会发送解禁感言、违反手动指令。现与「自然到期」路径对齐：检测到手动闭嘴则只退出自动闭嘴、跳过感言（并记 INFO 日志）
+
+### Technical
+
+- 三条感言调用路径（手动切换、`lift_ban` 解禁、禁言到期）共用 `_conversational_farewell`，修复落在该函数内部，一处改动全路径生效
+
 ## [1.5.0] - 2026-09-10
 
 ### Added

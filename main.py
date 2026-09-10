@@ -39,6 +39,15 @@ v1.4.0 bot_guard 用法：在 WebUI 配置页把其他 bot 的 QQ 号填入 bot_
 v1.5.0 禁言联动（mute_watcher）：检测到 bot 被禁言（OneBot group_ban 事件）自动进入
 该群闭嘴模式（独立于手动闭嘴，持久化）；禁言被解除（lift_ban 事件或到期检查）时自动
 退出闭嘴并像平常一样发出「解禁感言」。
+
+v1.5.1 修复两处感言缺陷：
+  - 感言里的 on_llm_request 钩子链被截断：三条调用路径（手动闭嘴/张嘴、lift_ban 解禁、
+    禁言到期）都在 stop_event() 之后才生成感言，而框架 call_event_hook 每跑完一个
+    handler 就查 event.is_stopped()、为真即中断，导致只有优先级最高的 meme_manager
+    跑到，livingmemory 的记忆召回注入不进来。现改为生成感言期间临时 continue_event()、
+    跑完立即恢复停止状态。
+  - lift_ban（管理员提前解封）分支缺少「禁言期间管理员又手动对群闭嘴」的判断，会在
+    手动闭嘴状态下仍然发感言；现与到期检查路径对齐。
 """
 
 from __future__ import annotations
@@ -112,7 +121,7 @@ DEFAULT_UNMUTE_INJECTION = (
     "astrbot_plugin_quiet_mode",
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环与禁言自动闭嘴",
-    "1.5.0",
+    "1.5.1",
     "",
 )
 class QuietModePlugin(Star):
@@ -473,12 +482,28 @@ class QuietModePlugin(Star):
                 user_prompt = f"管理员刚刚在群里对你说：「{trigger_text}」。{ask}"
 
             # 2) 触发所有 on_llm_request 钩子（livingmemory 等插件注入记忆召回）
-            #    注意：必须在 stop_event 之前调用，否则钩子循环会在第一个 handler 后提前返回
+            #    坑（1.5.1 修）：框架的 call_event_hook 每跑完一个 handler 就查
+            #    event.is_stopped()，为真立即 return（context_utils.py:105）；而 handler
+            #    是**按 priority 降序**排的（star_handler.py:26 sort(key=-priority)）。
+            #    本函数的三条调用路径（手动闭嘴/张嘴、lift_ban 解禁、禁言到期）**全都
+            #    已 stop_event 过**，不临时解除的话钩子链只会跑到优先级最高的 meme_manager
+            #    （99999）就断掉，livingmemory 的记忆召回注入不进来
+            #    （实测：'meme_manager - inject_meme_prompt stopped event propagation'
+            #     日志次数与感言次数严格 1:1）。
+            #    故此处临时 continue_event()（框架公开 API，同时清 _force_stopped 与
+            #    _result 的 STOP 标记），跑完 finally 立刻恢复，避免事件被放行到后续 stage。
             req = event.request_llm(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
                 contexts=contexts,
             )
+            was_stopped = False
+            try:
+                was_stopped = bool(event.is_stopped())
+                if was_stopped:
+                    event.continue_event()
+            except Exception as e:
+                logger.debug(f"[quiet_mode] 临时解除事件停止失败（记忆注入可能打折）: {e}")
             try:
                 from astrbot.core.pipeline.context_utils import call_event_hook
                 from astrbot.core.star.star_handler import EventType
@@ -491,6 +516,12 @@ class QuietModePlugin(Star):
                 )
             except Exception as e:
                 logger.warning(f"[quiet_mode] 触发 LLM 钩子失败（跳过记忆注入）: {e}")
+            finally:
+                if was_stopped:
+                    try:
+                        event.stop_event()
+                    except Exception:
+                        pass
 
             # 3) 调用 LLM
             provider = None
@@ -824,7 +855,13 @@ class QuietModePlugin(Star):
                 was_auto = gid in self.state.get("auto_quiet_groups", [])
                 self._exit_auto_quiet(gid)
                 event.stop_event()
-                if was_auto and self.unmute_farewell_enabled:
+                # 1.5.1: 与到期检查路径对齐——若禁言期间管理员又手动把该群设为闭嘴，
+                # 解封时只退出自动闭嘴、不再发感言（否则会违反手动闭嘴指令）
+                if was_auto and self._is_quiet(gid):
+                    logger.info(
+                        f"[quiet_mode] 群 {gid} 解禁，但该群处于手动闭嘴状态，跳过解禁感言"
+                    )
+                elif was_auto and self.unmute_farewell_enabled:
                     await self._send_unmute_farewell(
                         event,
                         trigger_desc=(
