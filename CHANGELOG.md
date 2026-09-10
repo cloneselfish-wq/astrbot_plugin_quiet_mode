@@ -5,6 +5,23 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.0] - 2026-09-10
+
+### Added
+
+- **规则兜底登记机器人（不依赖 AI 调工具）**：实测「告诉 bot 谁是 bot」并不可靠——群聊插件 `group_chat_plus` 默认关闭 `enable_tools_reminder`（模型拿不到任何工具文字提示），又会在 prompt 里写「请直接输出你的回复」、对 @ 了多人的消息额外注入「不一定只是在对你一个人说」，flash 级模型于是只顾聊天、根本不调用工具（生产日志实证：全日志 `使用工具：` 0 条，模型侧直连测试 tool_calls 正常）。
+  现补一条确定性通路：**AstrBot 管理员**在群里 `@` 某人并说「他是机器人 / 是BOT」时，插件在群消息阶段直接把人写进 `bot_qq_list` 并持久化，完全不依赖模型是否调用工具；随后通过 `on_llm_request` 把「已登记」告知模型，避免回复口径与名单不一致
+  - `bot_guard_auto_register`（默认 `true`）——规则兜底开关
+  - `bot_guard_register_keywords`（默认 `["机器人","机娘","智能体","bot","ai"]`）——触发关键词；纯 ASCII 关键词按整词匹配（避免 `ai` 命中 `said/wait/email`）
+  - `bot_guard_register_exclude`（默认含「不是机器人 / 取消标记 / 不要登记」等）——否定语境不登记
+  - 一条消息 `@` 多个人时会**逐个登记**（此前 LLM 工具一次只能处理一个目标）
+
+### Fixed
+
+- **管理员口径修正**：登记机器人的权限判定此前写成「群管理员」语义，实际 `event.is_admin()` 在框架里只由 `admins_id`（AstrBot 全局管理员）决定，与 QQ 群角色无关；而默认 `admins_id` 是占位符 `["astrbot"]`，等于**没有任何人**有权登记（即使模型调用了工具也会被拒）。
+  现改为明确以 **AstrBot 全局管理员**为准，并与插件 `admin_qqs` 白名单**取并集**（`admin_qqs` 的 schema 描述本来就是「与 AstrBot admin 权限并列」，旧代码却是覆盖语义，已一并修正 `_is_authorized`）
+- 被拒提示与工具 docstring 由「仅群管理员」改为「仅 AstrBot 管理员」，避免误导
+
 ## [1.6.0] - 2026-09-10
 
 ### Added

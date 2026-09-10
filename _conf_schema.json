@@ -40,8 +40,8 @@
   },
   "admin_qqs": {
     "type": "list",
-    "description": "额外的管理员 QQ 号列表（与 AstrBot admin 权限并列）",
-    "hint": "留空则使用 AstrBot 的 admin 权限判断。填你自己的 QQ 号可以避免 bot 自己权限配置影响。",
+    "description": "额外的管理员 QQ 号列表（与 AstrBot 管理员权限并列）",
+    "hint": "本插件的管理员口径 = AstrBot 全局管理员（配置里的「管理员ID」，即 cmd_config.json 的 admins_id）∪ 这里的白名单。两者取并集，不看 QQ 群角色。注意：如果 admins_id 还是默认占位符 [\"astrbot\"]，等于没有全局管理员，此时必须在这里填上你自己的 QQ。",
     "items": {"type": "string"},
     "default": []
   },
@@ -96,7 +96,7 @@
   "bot_qq_list": {
     "type": "list",
     "description": "其他 Bot 的 QQ 号列表",
-    "hint": "把群里其他机器人的 QQ 号填进来（字符串即可），留空表示不启用防循环。例如: [\"3177624799\", \"123456789\"]。v1.6.0 起也可由管理员在群里直接登记（见下）：@对方 说「他也是机器人」，LLM 会调用工具自动写入本项；或用指令 /标记bot @某人、/取消标记bot @某人。",
+    "hint": "把群里其他机器人的 QQ 号填进来（字符串即可），留空表示不启用防循环。例如: [\"3177624799\", \"123456789\"]。v1.6.0 起可由管理员在群里直接登记（见下）：@对方 说「他也是机器人」，LLM 会调用工具自动写入本项；或用指令 /标记bot @某人、/取消标记bot @某人。v1.7.0 起另加一条不依赖 AI 的规则兜底：管理员 @对方 并说「是机器人/是BOT」，插件直接写入本项（由 bot_guard_auto_register 控制）。",
     "items": {"type": "string"},
     "default": []
   },
@@ -118,6 +118,26 @@
     "description": "Bot 连续对话熔断轮数",
     "hint": "群里连续 N 条消息都来自其他 bot（中间没有真人插话）后，bot 停止回应这些 bot，直到有真人发言。0 = 不限制，只靠提示词约束。",
     "default": 0
+  },
+  "bot_guard_auto_register": {
+    "type": "bool",
+    "description": "规则兜底登记机器人（不依赖 AI 是否调用工具）",
+    "hint": "开启后：AstrBot 管理员在群里 @ 某人 并说「他是机器人 / 是BOT」时，插件直接把人写进 bot_qq_list，不再赌 AI 会不会主动调工具（实测群聊插件默认关掉工具文字提醒、又要求「直接输出回复」，模型经常只顾聊天不调工具）。关闭则只保留 AI 工具与 /标记bot 指令两条通路。",
+    "default": true
+  },
+  "bot_guard_register_keywords": {
+    "type": "list",
+    "description": "规则登记触发关键词",
+    "hint": "消息文本命中任一关键词（且含有非自己的 @ 目标）即视为「登记这些人也是机器人」。纯英文关键词按整词匹配，避免 ai 误命中 said / wait / email。",
+    "items": {"type": "string"},
+    "default": ["机器人", "机娘", "智能体", "bot", "ai"]
+  },
+  "bot_guard_register_exclude": {
+    "type": "list",
+    "description": "规则登记排除短语（否定语境不登记）",
+    "hint": "消息中出现任一短语即放弃本次规则登记，用来挡掉「他不是机器人」「取消标记」这类反话。",
+    "items": {"type": "string"},
+    "default": ["不是机器人", "不是bot", "不是ai", "取消标记", "取消登记", "别当机器人", "解除标记", "不再是机器人", "不要登记"]
   },
   "mute_auto_quiet_enabled": {
     "type": "bool",

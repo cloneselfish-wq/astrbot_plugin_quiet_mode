@@ -104,6 +104,32 @@ DEFAULT_BOT_GUARD_REMINDER = (
     "3. 这条提示只针对这个机器人，不影响你回复其他真人群友。"
 )
 
+# 1.7.0: 规则兜底登记机器人
+# 背景：把「谁是机器人」完全交给 LLM 决定要不要调工具并不可靠——群聊插件默认关掉了
+#      工具文字提醒（group_chat_plus 的 enable_tools_reminder=false），
+#      再叠加「请直接输出你的回复」这类指令，flash 级模型经常选择纯聊天。
+#      所以补一条确定性规则：AstrBot 管理员在群里 @ 某人并说「是机器人」就直接登记。
+DEFAULT_BOT_REGISTER_KEYWORDS = [
+    "机器人",
+    "机娘",
+    "智能体",
+    "bot",
+    "ai",
+]
+
+# 命中这些短语说明是「取消 / 否认」语境，不做登记
+DEFAULT_BOT_REGISTER_EXCLUDE = [
+    "不是机器人",
+    "不是bot",
+    "不是ai",
+    "取消标记",
+    "取消登记",
+    "别当机器人",
+    "解除标记",
+    "不再是机器人",
+    "不要登记",
+]
+
 # 1.5.0: 解禁感言注入模板
 DEFAULT_UNMUTE_INJECTION = (
     "【系统指令 · 最高优先级】刚刚，你被解除禁言了，从现在起重新可以在群里说话。\n"
@@ -122,7 +148,7 @@ DEFAULT_UNMUTE_INJECTION = (
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环、"
     "禁言自动闭嘴与对话式登记机器人",
-    "1.6.0",
+    "1.7.0",
     "",
 )
 class QuietModePlugin(Star):
@@ -217,6 +243,28 @@ class QuietModePlugin(Star):
         self._bot_rounds: dict[str, int] = {}
         self._bot_guard_extra_key = "quiet_mode_bot_guard_active"
 
+        # 1.7.0: 规则兜底登记（不依赖模型是否调用 llm_tool）+ AstrBot 管理员口径
+        self.bot_guard_auto_register = bool(
+            self.config.get("bot_guard_auto_register", True)
+        )
+        self.bot_guard_register_keywords = [
+            str(k).lower()
+            for k in (
+                self.config.get("bot_guard_register_keywords")
+                or DEFAULT_BOT_REGISTER_KEYWORDS
+            )
+            if str(k).strip()
+        ]
+        self.bot_guard_register_exclude = [
+            str(k).lower()
+            for k in (
+                self.config.get("bot_guard_register_exclude")
+                or DEFAULT_BOT_REGISTER_EXCLUDE
+            )
+            if str(k).strip()
+        ]
+        self._bot_register_extra_key = "quiet_mode_bot_registered"
+
         # 1.5.0: 禁言自动闭嘴（mute_watcher）
         self.mute_auto_quiet_enabled = bool(
             self.config.get("mute_auto_quiet_enabled", True)
@@ -252,6 +300,9 @@ class QuietModePlugin(Star):
             f"bot_guard={self.bot_guard_enabled} bot_qq={sorted(self.bot_qq_set)} "
             f"bot_reply_mode={self.bot_reply_mode} "
             f"bot_max_rounds={self.bot_guard_max_rounds} "
+            f"auto_register={self.bot_guard_auto_register} "
+            f"reg_kw={self.bot_guard_register_keywords} "
+            f"admins={sorted(self._astrbot_admin_ids())} "
             f"mute_auto={self.mute_auto_quiet_enabled} "
             f"unmute_farewell={self.unmute_farewell_enabled} "
             f"state={self.state}"
@@ -377,20 +428,25 @@ class QuietModePlugin(Star):
                 }
         return None
 
+    def _astrbot_admin_ids(self) -> set[str]:
+        """AstrBot 全局管理员 QQ（cmd_config.json 的 admins_id）。
+
+        框架里 event.role="admin" 只由 admins_id 决定（waking_check/stage.py），
+        所以这就是 AstrBot 口径的管理员，**与 QQ 群主/管理员无关**。
+        直接读配置比依赖 event.role 更稳（role 只在 waking_check 阶段被赋值）。
+        """
+        try:
+            cfg = self.context.get_config()
+            ids = cfg.get("admins_id") or []
+        except Exception:
+            ids = []
+        return {str(i).strip() for i in ids if str(i).strip()}
+
     def _is_authorized(self, event: AstrMessageEvent) -> bool:
+        """闭嘴/张嘴等动作的授权：admin_qqs 白名单 与 AstrBot 管理员 取并集。"""
         if not self.admin_only:
             return True
-        # 配置中显式指定的 admin QQ
-        if self.admin_qqs:
-            try:
-                return str(event.get_sender_id()) in self.admin_qqs
-            except Exception:
-                return False
-        # 否则使用 AstrBot 内置 admin 判断
-        try:
-            return bool(event.is_admin())
-        except Exception:
-            return False
+        return self._is_bot_admin(event)
 
     # ---------------- 对话式感言（1.3.0） ----------------
 
@@ -685,6 +741,9 @@ class QuietModePlugin(Star):
             except Exception:
                 pass
 
+            # 1.7.0：先跑规则兜底登记（管理员一句话即可，不依赖模型是否调工具）
+            await self._maybe_register_bots_from_message(event)
+
             gid = str(event.get_group_id())
             sender_id = str(event.get_sender_id())
             is_bot = sender_id in self.bot_qq_set
@@ -729,6 +788,17 @@ class QuietModePlugin(Star):
         try:
             if not self.bot_guard_enabled:
                 return
+            # 1.7.0：把「规则已自动登记」告诉模型，避免回复口径与名单不一致
+            reg = event.get_extra(self._bot_register_extra_key)
+            if reg and reg.get("added"):
+                names = "、".join(str(x) for x in reg["added"])
+                req.system_prompt = (req.system_prompt or "") + (
+                    f"\n\n【系统提示】系统刚刚已经把 {names} 登记为机器人。"
+                    "以后回复他们时不引用其消息，也不要与他们无限对谈。"
+                    "这件事已经办好了：你不需要再调用任何工具，也不要否认、质疑或"
+                    "要求用户重复一遍；按你的人格自然回应即可（可以带一句吐槽）。"
+                )
+                logger.info(f"[quiet_mode] bot_guard: 已注入自动登记提示 {reg['added']}")
             info = event.get_extra(self._bot_guard_extra_key)
             if not info:
                 return
@@ -991,20 +1061,29 @@ class QuietModePlugin(Star):
     # ---------------- 1.6.0 对话式登记机器人（llm_tool + 指令） ----------------
 
     def _is_bot_admin(self, event: AstrMessageEvent) -> bool:
-        """严格的管理员判定。
+        """严格的管理员判定（登记机器人等敏感动作）。
 
-        不复用 _is_authorized：后者在 admin_only=False 时会对所有人放行，
-        而登记机器人是「改名单、影响谁会被当 bot 对待」的动作，必须严格判权限。
+        口径 = **AstrBot 全局管理员**（cmd_config.json 的 admins_id），
+        不看 QQ 群角色；admin_qqs 是可选的额外白名单，两者取并集。
+
+        注意不要复用 admin_only 那条宽松路径：admin_only=False 时 _is_authorized
+        会对所有人放行，而「登记谁是 bot」会改变后续对话行为，必须严格判权限。
         """
-        if self.admin_qqs:
-            try:
-                return str(event.get_sender_id()) in self.admin_qqs
-            except Exception:
-                return False
         try:
-            return bool(event.is_admin())
+            sender = str(event.get_sender_id() or "").strip()
         except Exception:
             return False
+        if not sender:
+            return False
+        if sender in self.admin_qqs:
+            return True
+        # 兜底：event.is_admin() 也是 admins_id 口径（role 由 waking_check 赋值）
+        try:
+            if bool(event.is_admin()):
+                return True
+        except Exception:
+            pass
+        return sender in self._astrbot_admin_ids()
 
     @staticmethod
     def _extract_target_qq(event: AstrMessageEvent) -> str:
@@ -1032,6 +1111,116 @@ class QuietModePlugin(Star):
             if m.group(1) != self_id:
                 return m.group(1)
         return ""
+
+    # ---------------- 1.7.0 规则兜底登记机器人 ----------------
+
+    @staticmethod
+    def _keyword_hit(text: str, kw: str) -> bool:
+        """关键词命中：纯 ASCII 关键词按整词匹配，避免 "ai" 命中 "said/wait/email"。"""
+        if not kw:
+            return False
+        if kw.isascii():
+            return (
+                re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", text)
+                is not None
+            )
+        return kw in text
+
+    def _extract_all_target_qqs(self, event: AstrMessageEvent) -> list[str]:
+        """取消息里所有被 @ 的目标 QQ（去重；跳过 @全体 与 bot 自己）。"""
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            self_id = ""
+        out: list[str] = []
+        try:
+            for seg in event.get_messages() or []:
+                if not isinstance(seg, At):
+                    continue
+                q = str(getattr(seg, "qq", "") or "").strip()
+                if not q or q == "all" or q == self_id or not q.isdigit():
+                    continue
+                if q not in out:
+                    out.append(q)
+        except Exception:
+            pass
+        return out
+
+    def _detect_bot_register_targets(self, event: AstrMessageEvent) -> list[str]:
+        """规则识别「把这些人登记为机器人」。
+
+        判定 = 消息里至少有 1 个非自己的 @ 目标
+              + 文本命中机器人关键词（机器人/机娘/智能体/bot/ai）
+              + 不含「不是机器人 / 取消标记 / 不要登记」这类否定语境。
+        """
+        targets = self._extract_all_target_qqs(event)
+        if not targets:
+            return []
+        try:
+            text = (event.get_message_str() or "").lower()
+        except Exception:
+            text = ""
+        if not text:
+            return []
+        if not any(
+            self._keyword_hit(text, str(kw).lower())
+            for kw in self.bot_guard_register_keywords
+        ):
+            return []
+        for deny in self.bot_guard_register_exclude:
+            if deny and deny in text:
+                return []
+        return targets
+
+    async def _maybe_register_bots_from_message(self, event: AstrMessageEvent) -> None:
+        """规则兜底：管理员 @ 某人说「他是机器人」时直接登记，不等模型调工具。
+
+        「靠自然语言让 LLM 自己调工具」在群聊场景并不保证触发（群聊插件默认不给
+        模型工具文字提醒，并会注入「直接输出回复」类指令），所以名单变更必须有
+        一条确定性通路。这里不回复任何消息，只静默改名单并给后续 LLM 请求留提示。
+        """
+        try:
+            if not self.bot_guard_enabled or not self.bot_guard_auto_register:
+                return
+            try:
+                gid = str(event.get_group_id() or "")
+            except Exception:
+                gid = ""
+            if not gid:
+                return
+            targets = self._detect_bot_register_targets(event)
+            if not targets:
+                return
+            if not self._is_bot_admin(event):
+                logger.info(
+                    f"[quiet_mode] 规则登记：发送者非 AstrBot 管理员，跳过 "
+                    f"sender={event.get_sender_id()} group={gid} targets={targets}"
+                )
+                return
+            lst = self._bot_qq_list()
+            added = [q for q in targets if q not in lst]
+            if not added:
+                logger.info(
+                    f"[quiet_mode] 规则登记：{targets} 已在名单中，无需重复写入"
+                )
+                return
+            self.config["bot_qq_list"] = lst + added
+            self.bot_qq_set = set(self.config["bot_qq_list"])
+            ok = await self._persist_plugin_config()
+            logger.info(
+                f"[quiet_mode] bot_guard 名单更新 action=auto_add qq={added} "
+                f"now={self.config['bot_qq_list']} persisted={ok} "
+                f"by={event.get_sender_id()} group={gid}"
+            )
+            event.set_extra(
+                self._bot_register_extra_key,
+                {"added": added, "persisted": ok},
+            )
+        except Exception as e:
+            logger.error(
+                f"[quiet_mode] _maybe_register_bots_from_message 异常: {e}",
+                exc_info=True,
+            )
 
     def _bot_qq_list(self) -> list[str]:
         return [
@@ -1113,9 +1302,9 @@ class QuietModePlugin(Star):
         action: str = "add",
         qq: str = "",
     ):
-        """把某个群成员登记为「机器人」，或取消登记。仅群管理员可调用。
+        """把某个群成员登记为「机器人」，或取消登记。仅 AstrBot 管理员可调用。
 
-        当群管理员明确告诉你「某个人 / 某个账号也是机器人（BOT、AI）」，
+        当 AstrBot 管理员明确告诉你「某个人 / 某个账号也是机器人（BOT、AI）」，
         需要记住他、以便以后回复他时不引用他的消息时，调用本工具。
         若管理员在这条消息里 @ 了对方，可以不填 qq，系统会自动从 @ 中取号。
 
@@ -1139,7 +1328,10 @@ class QuietModePlugin(Star):
                 f"[quiet_mode] 拒绝非管理员登记机器人 "
                 f"sender={event.get_sender_id()} group={gid}"
             )
-            return "❌ 只有群管理员才能登记机器人，身份校验未通过。"
+            return (
+                "❌ 只有 AstrBot 管理员（配置里的管理员ID / 本插件 admin_qqs "
+                "白名单）才能登记机器人，身份校验未通过。"
+            )
 
         act = (action or "add").strip().lower()
         if act in ("list", "query", "查看"):
