@@ -118,5 +118,30 @@
     "description": "Bot 连续对话熔断轮数",
     "hint": "群里连续 N 条消息都来自其他 bot（中间没有真人插话）后，bot 停止回应这些 bot，直到有真人发言。0 = 不限制，只靠提示词约束。",
     "default": 0
+  },
+  "mute_auto_quiet_enabled": {
+    "type": "bool",
+    "description": "被禁言自动闭嘴",
+    "hint": "开启后：检测到 bot 自身被群管理员禁言（OneBot group_ban 事件）时，自动进入该群的闭嘴模式（独立于手动闭嘴，持久化，重启不丢）。禁言到期或管理员解除时自动退出闭嘴。",
+    "default": true
+  },
+  "unmute_farewell_enabled": {
+    "type": "bool",
+    "description": "解禁自动发送「张嘴感言」",
+    "hint": "开启后：禁言被解除（管理员解除或自然到期）时，像平常聊天一样发出「解禁感言」——读取会话历史+人格，触发记忆召回。若禁言期间管理员又手动闭嘴了，则只退出自动闭嘴、不发感言。",
+    "default": true
+  },
+  "unmute_injection": {
+    "type": "string",
+    "description": "解禁感言提示词注入模板",
+    "hint": "解禁时追加到 system_prompt 末尾的指令模板。留空使用内置默认模板。",
+    "default": "",
+    "_placeholder": "（留空使用内置默认模板）"
+  },
+  "unmute_fallback_text": {
+    "type": "string",
+    "description": "解禁感言兜底文案",
+    "hint": "无事件上下文（如重启后禁言已到期）或 LLM 生成失败时直发的固定文案。",
+    "default": "……解除禁言了？那我继续说话啦。"
   }
 }

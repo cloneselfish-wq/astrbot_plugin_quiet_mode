@@ -5,6 +5,25 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] - 2026-09-10
+
+### Added
+
+- **禁言联动（mute_watcher）**：bot 被群管理员禁言时自动闭嘴，解禁时自动开口
+  - 检测到 bot 自身被禁言（OneBot `group_ban` 事件，`sub_type=ban`）→ 自动进入该群**自动闭嘴**名单（独立于手动闭嘴、持久化、重启不丢），记录禁言到期时间
+  - 禁言解除（管理员解除 `lift_ban` 事件，或自然到期由周期任务发现）→ 自动退出闭嘴，并复用 v1.3.0 的对话式感言机制发出「解禁感言」（读会话历史+人格、触发记忆召回）
+  - 禁言期间管理员又手动闭嘴该群 → 只退出自动闭嘴、不发感言（尊重手动指令）
+  - 无事件上下文（如重启后禁言已到期）时走兜底文案直发
+  - 新配置：`mute_auto_quiet_enabled`、`unmute_farewell_enabled`、`unmute_injection`、`unmute_fallback_text`
+  - `/quiet_status` 新增「禁言自动闭嘴」名单显示
+
+### Technical
+
+- 框架源码结论：aiocqhttp 适配器把 OneBot `notice` 事件转成 `GROUP_MESSAGE` 类型事件（`message_str` 为空、`raw_message` 保留原始 dict），会正常流进群消息监听器，可直接从 `event.message_obj.raw_message` 读 `post_type/notice_type/sub_type`
+- 监听器 `priority=10001`，**高于闭嘴拦截的 10000**：否则解禁事件进来时会被静默拦截 `stop_event()` 吞掉，永远走不到解禁逻辑
+- QQ 禁言**自然到期不产生 `lift_ban` 事件**，故用「持久化到期时间戳 + 每 30s 周期检查任务」兜底；检查任务在 `terminate()` 中随插件卸载取消
+- `mute_watcher` 与 `bot_guard` 监听器均对 notice 类事件 `stop_event()`，避免空消息流进群聊决策插件
+
 ## [1.4.0] - 2026-09-10
 
 ### Added

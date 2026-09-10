@@ -22,6 +22,7 @@
 - 💾 **状态持久化**：重启容器/进程不丢失闭嘴状态
 - 🛡 **管理员权限控制**：仅管理员可切换，普通用户的指令静默丢弃
 - 🤖 **Bot 防互引用循环**：群里两个都开「回复时引用」的 bot 会无限互相对话——把对方 bot 的 QQ 号填进配置，本 bot 回复它时**不引用对方消息**，并提醒 LLM「对方也是 bot，别无限对谈」；回复普通群友的引用行为不受影响
+- 🚫 **禁言联动**：检测到 bot 自己被群管理员禁言时**自动进入该群闭嘴模式**（独立于手动闭嘴，持久化）；禁言被解除或自然到期时自动退出闭嘴，并像平常聊天一样发出「解禁感言」
 
 ## 安装
 
@@ -79,6 +80,10 @@ git clone https://github.com/cloneselfish-wq/astrbot_plugin_quiet_mode.git
 | `bot_reply_mode` | `no_quote` | `no_quote`=回复但不引用对方；`ignore`=完全无视其他 bot 的消息 |
 | `bot_guard_reminder` | 内置模板 | 注入 LLM 的「对方也是 bot」提醒，支持 `{sender_name}` `{sender_id}` `{group_id}` 占位符 |
 | `bot_guard_max_rounds` | `0` | 连续 N 条 bot 消息无人插话后熔断（停止回应 bot），`0`=不限制 |
+| `mute_auto_quiet_enabled` | `true` | 被禁言自动闭嘴：检测到 bot 被禁言时自动进入该群闭嘴模式（独立、持久化） |
+| `unmute_farewell_enabled` | `true` | 解禁自动发「张嘴感言」：禁言解除/到期时像平常聊天一样重新开口 |
+| `unmute_injection` | 内置模板 | 解禁感言提示词注入（可自定义） |
+| `unmute_fallback_text` | `……解除禁言了？那我继续说话啦。` | 解禁感言兜底文案（无事件上下文或 LLM 失败时直发） |
 
 ### 推荐配置：Bot 防互引用循环
 
@@ -92,6 +97,17 @@ git clone https://github.com/cloneselfish-wq/astrbot_plugin_quiet_mode.git
 ### 推荐配置：让"张嘴感言"更真实
 
 若希望 bot 张嘴时能对**闭嘴期间群里聊的内容**做出反应，请关闭 `silent_intercept_enabled`、保留 `llm_intercept_enabled`——这样闭嘴期间的消息会被 livingmemory 等插件正常记录。
+
+### 禁言联动说明
+
+被群管理员禁言时（QQ 的 OneBot `group_ban` 事件），插件会：
+
+1. 自动把该群加入「自动闭嘴名单」（与手动闭嘴名单分开，`/quiet_status` 可见），**持久化**，重启不丢
+2. 记录禁言时长；禁言期内的消息按当前拦截策略处理
+3. 禁言被**管理员手动解除**（`lift_ban` 事件）或**自然到期**（插件每 30s 检查一次）时，自动退出自动闭嘴，并发出「解禁感言」
+4. 若禁言期间管理员又手动对该群「闭嘴」，则只退出自动闭嘴、不发感言（尊重手动指令）
+
+> 注意：自然到期由 QQ 服务端静默解禁、不产生事件，所以插件用「到期时间戳 + 30s 周期检查」兜底；若插件在禁言期间被重启，解禁时会因缺少事件上下文而使用 `unmute_fallback_text` 兜底文案。
 
 ## 工作原理
 

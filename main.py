@@ -35,12 +35,18 @@ astrbot_plugin_quiet_mode
 v1.4.0 bot_guard 用法：在 WebUI 配置页把其他 bot 的 QQ 号填入 bot_qq_list 即可。
 回复那些 bot 时不引用对方消息 + LLM 收到「对方是 bot」提醒，避免两个 bot 互相引用
 无限对谈；回复普通群友的引用行为不受影响。
+
+v1.5.0 禁言联动（mute_watcher）：检测到 bot 被禁言（OneBot group_ban 事件）自动进入
+该群闭嘴模式（独立于手动闭嘴，持久化）；禁言被解除（lift_ban 事件或到期检查）时自动
+退出闭嘴并像平常一样发出「解禁感言」。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from typing import Any
 
 from astrbot.api.star import Star, Context, register
@@ -89,12 +95,24 @@ DEFAULT_BOT_GUARD_REMINDER = (
     "3. 这条提示只针对这个机器人，不影响你回复其他真人群友。"
 )
 
+# 1.5.0: 解禁感言注入模板
+DEFAULT_UNMUTE_INJECTION = (
+    "【系统指令 · 最高优先级】刚刚，你被解除禁言了，从现在起重新可以在群里说话。\n"
+    "请严格遵守：\n"
+    "1. 像平常聊天一样自然地重新开口：结合上文对话和你记得的内容，"
+    "用你的人格风格做出真实反应（比如吐槽自己刚才被禁言、对禁言期间群里发生的事发表"
+    "看法、表达重新能说话的心情）。\n"
+    "2. 不要提「系统指令」或任何元信息；即使你的人格傲娇/不服气，也只是口头小抱怨，"
+    "整体保持自然。\n"
+    "3. 只输出你要发在群里的那句话，控制在合适长度。"
+)
+
 
 @register(
     "astrbot_plugin_quiet_mode",
     "user",
-    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环",
-    "1.4.0",
+    "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环与禁言自动闭嘴",
+    "1.5.0",
     "",
 )
 class QuietModePlugin(Star):
@@ -189,6 +207,30 @@ class QuietModePlugin(Star):
         self._bot_rounds: dict[str, int] = {}
         self._bot_guard_extra_key = "quiet_mode_bot_guard_active"
 
+        # 1.5.0: 禁言自动闭嘴（mute_watcher）
+        self.mute_auto_quiet_enabled = bool(
+            self.config.get("mute_auto_quiet_enabled", True)
+        )
+        self.unmute_farewell_enabled = bool(
+            self.config.get("unmute_farewell_enabled", True)
+        )
+        custom_unmute = str(self.config.get("unmute_injection") or "").strip()
+        self.unmute_injection = custom_unmute or DEFAULT_UNMUTE_INJECTION
+        self.unmute_fallback_text = str(
+            self.config.get("unmute_fallback_text") or "……解除禁言了？那我继续说话啦。"
+        )
+        # 运行时：每群禁言到期检查任务；禁言时存下的群事件（供解禁感言复用上下文）
+        self._mute_checker_task: asyncio.Task | None = None
+        self._mute_events: dict[str, AstrMessageEvent] = {}
+
+        # 重启恢复：若持久化状态里已有自动闭嘴群，拉起到期检查任务
+        if self.state.get("auto_quiet_groups"):
+            self._ensure_mute_checker()
+            logger.info(
+                f"[quiet_mode] 重启恢复：检测到自动闭嘴群 {self.state['auto_quiet_groups']}，"
+                "到期检查任务已启动"
+            )
+
         logger.info(
             f"[quiet_mode] 已加载 | target={self.target_keywords} "
             f"silent={self.silent_triggers} resume={self.resume_triggers} "
@@ -200,6 +242,8 @@ class QuietModePlugin(Star):
             f"bot_guard={self.bot_guard_enabled} bot_qq={sorted(self.bot_qq_set)} "
             f"bot_reply_mode={self.bot_reply_mode} "
             f"bot_max_rounds={self.bot_guard_max_rounds} "
+            f"mute_auto={self.mute_auto_quiet_enabled} "
+            f"unmute_farewell={self.unmute_farewell_enabled} "
             f"state={self.state}"
         )
 
@@ -213,13 +257,24 @@ class QuietModePlugin(Star):
                 if isinstance(data, dict):
                     data.setdefault("global_quiet", False)
                     data.setdefault("quiet_groups", [])
+                    data.setdefault("auto_quiet_groups", [])  # 1.5.0 禁言自动闭嘴
+                    data.setdefault("mute_expire_at", {})  # 1.5.0 群 → 禁言到期时间戳
                     # 兜底类型保护
                     if not isinstance(data["quiet_groups"], list):
                         data["quiet_groups"] = []
+                    if not isinstance(data["auto_quiet_groups"], list):
+                        data["auto_quiet_groups"] = []
+                    if not isinstance(data["mute_expire_at"], dict):
+                        data["mute_expire_at"] = {}
                     return data
             except Exception as e:
                 logger.warning(f"[quiet_mode] 加载状态失败，将重置: {e}")
-        return {"global_quiet": False, "quiet_groups": []}
+        return {
+            "global_quiet": False,
+            "quiet_groups": [],
+            "auto_quiet_groups": [],
+            "mute_expire_at": {},
+        }
 
     def _save_state(self):
         try:
@@ -231,7 +286,11 @@ class QuietModePlugin(Star):
             logger.error(f"[quiet_mode] 保存状态失败: {e}")
 
     def _is_quiet(self, group_id: str) -> bool:
-        return self.state["global_quiet"] or group_id in self.state["quiet_groups"]
+        return (
+            self.state["global_quiet"]
+            or group_id in self.state["quiet_groups"]
+            or group_id in self.state.get("auto_quiet_groups", [])
+        )
 
     def _apply_intercept(self, event: AstrMessageEvent):
         """
@@ -357,7 +416,12 @@ class QuietModePlugin(Star):
             return [], None
 
     async def _conversational_farewell(
-        self, event: AstrMessageEvent, action: str, trigger_text: str
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        trigger_text: str,
+        injection: str | None = None,
+        trigger_desc: str | None = None,
     ) -> str:
         """
         对话式感言：像平常聊天一样生成闭嘴/张嘴的反应。
@@ -370,14 +434,17 @@ class QuietModePlugin(Star):
         - 生成后把这条问答写回 conversation，之后的正常聊天仍然记得这次告别
 
         action: "silent"（闭嘴前最后反应）或 "resume"（重新开口第一反应）
+        injection: 自定义注入模板（1.5.0 起，如解禁感言模板）；None 时按 action 取默认
+        trigger_desc: 写进 user_prompt 的触发描述；None 时用「管理员刚刚对你说：…」
         失败时返回可配置的兜底文案，绝不抛异常。
         """
         fallback = (
             self.silent_fallback_text if action == "silent" else self.resume_fallback_text
         )
-        injection = (
-            self.silent_injection if action == "silent" else self.resume_injection
-        )
+        if injection is None:
+            injection = (
+                self.silent_injection if action == "silent" else self.resume_injection
+            )
         try:
             umo = getattr(event, "unified_msg_origin", None) or ""
 
@@ -400,7 +467,10 @@ class QuietModePlugin(Star):
                 if action == "silent"
                 else "（这是你解除闭嘴后的第一次发言，请按系统指令回应）"
             )
-            user_prompt = f"管理员刚刚在群里对你说：「{trigger_text}」。{ask}"
+            if trigger_desc:
+                user_prompt = f"{trigger_desc}。{ask}"
+            else:
+                user_prompt = f"管理员刚刚在群里对你说：「{trigger_text}」。{ask}"
 
             # 2) 触发所有 on_llm_request 钩子（livingmemory 等插件注入记忆召回）
             #    注意：必须在 stop_event 之前调用，否则钩子循环会在第一个 handler 后提前返回
@@ -571,6 +641,12 @@ class QuietModePlugin(Star):
     ):
         """识别来自其他 bot 的群消息：打标（提醒注入+免引用）、按模式拦截、轮数熔断。"""
         try:
+            # 跳过 OneBot notice/request 等非消息事件（1.5.0）
+            raw = getattr(event.message_obj, "raw_message", None)
+            if raw is not None and hasattr(raw, "get"):
+                post_type = raw.get("post_type")
+                if post_type and post_type != "message":
+                    return
             try:
                 if str(event.get_sender_id()) == str(event.get_self_id()):
                     return
@@ -691,6 +767,189 @@ class QuietModePlugin(Star):
         except Exception as e:
             logger.error(f"[quiet_mode] bot_guard_no_quote 异常: {e}", exc_info=True)
 
+    # ---------------- 禁言自动闭嘴（1.5.0 mute_watcher） ----------------
+    # 背景规则（框架源码验证）：
+    # - aiocqhttp 适配器把 OneBot notice 事件转成 GROUP_MESSAGE 类型的 AstrMessageEvent
+    #   （message_str 为空、raw_message 保留原始事件 dict），会正常流进群消息监听器
+    # - group_ban 事件：user_id=被禁言者、operator_id=操作管理员、duration=秒数；
+    #   sub_type=ban（被禁）/lift_ban（被解除）。禁言自然到期不会产生 lift_ban 事件，
+    #   所以靠 expire_at（持久化）+ 周期检查任务兜底
+    # - 本监听器 priority=10001 高于闭嘴拦截的 10000：解禁事件进来时先退出闭嘴，
+    #   否则会被静默拦截 stop_event 吞掉、永远走不到解禁逻辑
+
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE,
+        priority=10001,
+    )
+    async def mute_watcher_on_group_message(
+        self, event: AstrMessageEvent, *args: Any, **kwargs: Any
+    ):
+        """检测 bot 自身被禁言/解除禁言，自动切换该群的闭嘴状态。"""
+        try:
+            if not (
+                self.mute_auto_quiet_enabled or self.unmute_farewell_enabled
+            ):
+                return
+            raw = getattr(event.message_obj, "raw_message", None)
+            if raw is None or not hasattr(raw, "get"):
+                return
+            post_type = raw.get("post_type")
+            if post_type != "notice" or raw.get("notice_type") != "group_ban":
+                return
+
+            try:
+                self_id = str(event.get_self_id())
+            except Exception:
+                return
+            if str(raw.get("user_id") or "") != self_id:
+                return  # 只关心自己被禁/解禁
+
+            gid = str(raw.get("group_id") or "") or str(event.get_group_id())
+            sub_type = raw.get("sub_type")
+            operator = str(raw.get("operator_id") or "")
+
+            if sub_type == "ban":
+                if not self.mute_auto_quiet_enabled:
+                    event.stop_event()
+                    return
+                try:
+                    duration = int(raw.get("duration") or 0)
+                except (TypeError, ValueError):
+                    duration = 0
+                if duration <= 0:
+                    duration = 600  # 事件缺 duration 时的保守兜底
+                self._enter_auto_quiet(gid, event, duration)
+                event.stop_event()
+            elif sub_type == "lift_ban":
+                was_auto = gid in self.state.get("auto_quiet_groups", [])
+                self._exit_auto_quiet(gid)
+                event.stop_event()
+                if was_auto and self.unmute_farewell_enabled:
+                    await self._send_unmute_farewell(
+                        event,
+                        trigger_desc=(
+                            f"刚刚，管理员（QQ:{operator}）解除了对你的禁言"
+                        ),
+                    )
+        except Exception as e:
+            logger.error(
+                f"[quiet_mode] mute_watcher_on_group_message 异常: {e}", exc_info=True
+            )
+
+    def _enter_auto_quiet(
+        self, gid: str, event: AstrMessageEvent, duration: int
+    ):
+        """被禁言：加入自动闭嘴名单（持久化），记录到期时间，存下事件供解禁感言复用。"""
+        if gid not in self.state.setdefault("auto_quiet_groups", []):
+            self.state["auto_quiet_groups"].append(gid)
+        self.state.setdefault("mute_expire_at", {})[gid] = time.time() + duration
+        self._save_state()
+        self._mute_events[gid] = event
+        self._ensure_mute_checker()
+        logger.info(
+            f"[quiet_mode] 检测到禁言 → 群 {gid} 自动闭嘴 "
+            f"duration={duration}s (至 {time.strftime('%H:%M:%S', time.localtime(time.time() + duration))})"
+        )
+
+    def _exit_auto_quiet(self, gid: str):
+        """解除禁言：退出自动闭嘴名单（手动闭嘴状态不受影响），清掉到期记录。"""
+        changed = False
+        auto_lst = self.state.setdefault("auto_quiet_groups", [])
+        if gid in auto_lst:
+            auto_lst.remove(gid)
+            changed = True
+        self.state.setdefault("mute_expire_at", {}).pop(gid, None)
+        self._mute_events.pop(gid, None)
+        if changed:
+            self._save_state()
+            logger.info(f"[quiet_mode] 禁言解除 → 群 {gid} 退出自动闭嘴")
+
+    def _ensure_mute_checker(self):
+        """拉起禁言到期周期检查任务（幂等）。"""
+        if self._mute_checker_task is None or self._mute_checker_task.done():
+            try:
+                self._mute_checker_task = asyncio.get_running_loop().create_task(
+                    self._mute_checker_loop()
+                )
+            except RuntimeError:
+                # 没有运行中的事件循环（理论上不会发生在插件生命周期内）
+                self._mute_checker_task = None
+
+    async def _mute_checker_loop(self):
+        """每 30s 检查一次自动闭嘴群：禁言到期（QQ 服务端自动解禁，无事件）则恢复。"""
+        logger.debug("[quiet_mode] 禁言到期检查任务已启动 (interval=30s)")
+        try:
+            while True:
+                await asyncio.sleep(30)
+                now = time.time()
+                expire_map = self.state.get("mute_expire_at", {})
+                expired = [
+                    gid
+                    for gid, ts in list(expire_map.items())
+                    if ts and now >= float(ts)
+                ]
+                for gid in expired:
+                    was_auto = gid in self.state.get("auto_quiet_groups", [])
+                    event = self._mute_events.get(gid)
+                    self._exit_auto_quiet(gid)
+                    if not was_auto:
+                        continue
+                    logger.info(f"[quiet_mode] 群 {gid} 禁言到期，自动恢复说话")
+                    # 禁言期间管理员手动闭嘴了 → 只退出自动闭嘴，不发感言
+                    if self._is_quiet(gid) or not self.unmute_farewell_enabled:
+                        continue
+                    if event is not None:
+                        await self._send_unmute_farewell(
+                            event,
+                            trigger_desc="你的禁言已经到期，自动恢复了说话",
+                        )
+                    else:
+                        # 重启等导致没有事件上下文：走兜底文案直发
+                        await self._send_fallback_unmute(gid)
+        except asyncio.CancelledError:
+            logger.debug("[quiet_mode] 禁言到期检查任务已停止")
+        except Exception as e:
+            logger.error(f"[quiet_mode] 禁言到期检查任务异常退出: {e}", exc_info=True)
+
+    async def _send_unmute_farewell(
+        self, event: AstrMessageEvent, trigger_desc: str
+    ):
+        """解禁感言：复用对话式感言（会话历史+人格+记忆召回），用解禁专用模板。"""
+        try:
+            text = await self._conversational_farewell(
+                event,
+                "resume",
+                trigger_text=trigger_desc,
+                injection=self.unmute_injection,
+                trigger_desc=trigger_desc,
+            )
+            if text:
+                await event.send(event.plain_result(text))
+                logger.info("[quiet_mode] 解禁感言已发送")
+        except Exception as e:
+            logger.error(f"[quiet_mode] 发送解禁感言失败: {e}", exc_info=True)
+
+    async def _send_fallback_unmute(self, gid: str):
+        """无事件上下文时的解禁兜底：通过 context.send_message 直发固定文案。"""
+        try:
+            from astrbot.api.event import MessageChain
+            from astrbot.api.message_components import Plain
+
+            umo = f"aiocqhttp:GroupMessage:{gid}"
+            await self.context.send_message(
+                umo, MessageChain(chain=[Plain(self.unmute_fallback_text)])
+            )
+            logger.info(f"[quiet_mode] 解禁兜底文案已发送 group={gid}")
+        except Exception as e:
+            logger.warning(
+                f"[quiet_mode] 解禁兜底文案发送失败 group={gid}: {e}"
+            )
+
+    async def terminate(self):
+        """插件卸载/停止：取消禁言到期检查任务。"""
+        if self._mute_checker_task is not None and not self._mute_checker_task.done():
+            self._mute_checker_task.cancel()
+
     # ---------------- 标准指令（需要 wake_prefix） ----------------
 
     @filter.command("quiet_status", alias={"闭嘴状态", "沉默状态"})
@@ -701,6 +960,7 @@ class QuietModePlugin(Star):
             f"本群 (id={gid}): {'🔇 闭嘴中' if self._is_quiet(gid) else '🔊 正常'}",
             f"闭嘴群数: {len(self.state['quiet_groups'])}",
             f"闭嘴名单: {self.state['quiet_groups']}",
+            f"禁言自动闭嘴: {self.state.get('auto_quiet_groups', []) or '无'}",
             f"Bot防循环: {'✅ 开' if self.bot_guard_enabled else '❌ 关'} "
             f"(名单: {sorted(self.bot_qq_set) or '空'}, 模式: {self.bot_reply_mode}, "
             f"熔断轮数: {self.bot_guard_max_rounds or '不限'})",
