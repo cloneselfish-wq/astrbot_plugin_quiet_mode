@@ -41,7 +41,7 @@
   "admin_qqs": {
     "type": "list",
     "description": "额外的管理员 QQ 号列表（与 AstrBot 管理员权限并列）",
-    "hint": "本插件的管理员口径 = AstrBot 全局管理员（配置里的「管理员ID」，即 cmd_config.json 的 admins_id）∪ 这里的白名单。两者取并集，不看 QQ 群角色。注意：如果 admins_id 还是默认占位符 [\"astrbot\"]，等于没有全局管理员，此时必须在这里填上你自己的 QQ。",
+    "hint": "只作用于「闭嘴/张嘴」这类动作的额外白名单。**登记机器人不读本项**——那条规则只认 AstrBot 全局管理员（配置里的「管理员ID」，即 cmd_config.json 的 admins_id），不在插件里另设一套管理员。若 admins_id 仍是默认占位符 [\"astrbot\"]，等于没有全局管理员，需先在 WebUI「配置 → 管理员ID」里补上自己的 QQ。另外本项也不看 QQ 群主/管理员角色。",
     "items": {"type": "string"},
     "default": []
   },
@@ -122,7 +122,7 @@
   "bot_guard_auto_register": {
     "type": "bool",
     "description": "规则兜底登记机器人（不依赖 AI 是否调用工具）",
-    "hint": "开启后：AstrBot 管理员在群里 @ 某人 并说「他是机器人 / 是BOT」时，插件直接把人写进 bot_qq_list，不再赌 AI 会不会主动调工具（实测群聊插件默认关掉工具文字提醒、又要求「直接输出回复」，模型经常只顾聊天不调工具）。关闭则只保留 AI 工具与 /标记bot 指令两条通路。",
+    "hint": "开启后：AstrBot 全局管理员（admins_id）在群里 @ 某人 并说「他是机器人 / 是BOT」时，插件直接把人写进 bot_qq_list，不再赌 AI 会不会主动调工具（实测群聊插件默认关掉工具文字提醒、又要求「直接输出回复」，模型经常只顾聊天不调工具）。权限**只认 AstrBot 全局管理员**，不读本插件的 admin_qqs，也不看 QQ 群角色。关闭则只保留 AI 工具与 /标记bot 指令两条通路。",
     "default": true
   },
   "bot_guard_register_keywords": {

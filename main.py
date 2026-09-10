@@ -148,7 +148,7 @@ DEFAULT_UNMUTE_INJECTION = (
     "user",
     "可配置的闭嘴/张嘴控制：让指定人格闭嘴不插话（含最后感言）；含 Bot 防互引用循环、"
     "禁言自动闭嘴与对话式登记机器人",
-    "1.7.0",
+    "1.7.1",
     "",
 )
 class QuietModePlugin(Star):
@@ -443,10 +443,21 @@ class QuietModePlugin(Star):
         return {str(i).strip() for i in ids if str(i).strip()}
 
     def _is_authorized(self, event: AstrMessageEvent) -> bool:
-        """闭嘴/张嘴等动作的授权：admin_qqs 白名单 与 AstrBot 管理员 取并集。"""
+        """闭嘴/张嘴等动作的授权。
+
+        admin_only 关闭 → 放行所有人；否则 admin_qqs 白名单 ∪ AstrBot 管理员。
+        """
         if not self.admin_only:
             return True
-        return self._is_bot_admin(event)
+        try:
+            sender = str(event.get_sender_id() or "").strip()
+        except Exception:
+            return False
+        if not sender:
+            return False
+        if sender in self.admin_qqs:
+            return True
+        return sender in self._astrbot_admin_ids()
 
     # ---------------- 对话式感言（1.3.0） ----------------
 
@@ -1061,10 +1072,11 @@ class QuietModePlugin(Star):
     # ---------------- 1.6.0 对话式登记机器人（llm_tool + 指令） ----------------
 
     def _is_bot_admin(self, event: AstrMessageEvent) -> bool:
-        """严格的管理员判定（登记机器人等敏感动作）。
+        """登记机器人等敏感动作的权限判定。
 
-        口径 = **AstrBot 全局管理员**（cmd_config.json 的 admins_id），
-        不看 QQ 群角色；admin_qqs 是可选的额外白名单，两者取并集。
+        **只认 AstrBot 全局管理员**（cmd_config.json 的 admins_id）——
+        登记谁是 bot 属于平台级敏感动作，不在插件里另设一套管理员配置，
+        也刻意不看 QQ 群主/管理员角色（群角色由群主随意授予，不等于平台管理员）。
 
         注意不要复用 admin_only 那条宽松路径：admin_only=False 时 _is_authorized
         会对所有人放行，而「登记谁是 bot」会改变后续对话行为，必须严格判权限。
@@ -1073,17 +1085,7 @@ class QuietModePlugin(Star):
             sender = str(event.get_sender_id() or "").strip()
         except Exception:
             return False
-        if not sender:
-            return False
-        if sender in self.admin_qqs:
-            return True
-        # 兜底：event.is_admin() 也是 admins_id 口径（role 由 waking_check 赋值）
-        try:
-            if bool(event.is_admin()):
-                return True
-        except Exception:
-            pass
-        return sender in self._astrbot_admin_ids()
+        return bool(sender) and sender in self._astrbot_admin_ids()
 
     @staticmethod
     def _extract_target_qq(event: AstrMessageEvent) -> str:

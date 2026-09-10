@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.1] - 2026-09-10
+
+### Changed
+
+- **登记机器人不再读插件自己的管理员配置**：该动作的权限**只认 AstrBot 全局管理员**（`cmd_config.json` 的 `admins_id`）。登记谁是 bot 属于平台级敏感动作，不应在插件里另设一套管理员名单，也不该看 QQ 群主/管理员角色（群角色由群主随意授予，不等于平台管理员）。
+  - `admin_qqs` 保留原义，但**只作用于「闭嘴/张嘴」等动作**，不再影响登记机器人
+  - 被拒提示会直接指向「AstrBot 全局管理员（配置里的管理员ID）」
+
+> ⚠️ AstrBot 的 `admins_id` 默认是占位符 `["astrbot"]`，此时**没有任何人是管理员**，登记动作会被拒绝。请先在 WebUI「配置 → 管理员ID」里填上你的 QQ。
+
 ## [1.7.0] - 2026-09-10
 
 ### Added
